@@ -73,9 +73,76 @@ def test_change_font_size_color_and_alignment(one_pager, registry):
     assert {font_key(s["font"]) for s in spans} == {"playfairdisplaybold"}
     assert {round(s["size"]) for s in spans} == {40}
     assert {s["color"] for s in spans} == {0x1A1A1A}
-    # Left aligned at the block's left edge, and the top of the block stays put.
-    assert min(s["bbox"][0] for s in spans) == pytest.approx(head["bbox"][0], abs=2)
+    # Left aligned: moves to the left edge of the free space (half an inch from the page edge;
+    # the full-width orange band behind it is no limit). The top of the block stays put.
+    assert min(s["bbox"][0] for s in spans) == pytest.approx(36, abs=2)
     assert min(s["bbox"][1] for s in spans) == pytest.approx(head["bbox"][1], abs=4)
+
+
+@pytest.mark.parametrize("align", ["right", "center"])
+def test_alignment_change_moves_single_line(one_pager, registry, align):
+    editor = DocumentEditor(one_pager, registry)
+    sub = find_text(editor, "Reach")  # left aligned, one line, nothing to its right
+    editor.apply([{"op": "editText", "id": sub["id"], "runs": sub["runs"], "align": align}])
+    spans = [s for s in spans_in(editor.export(), (0, 160, 612, 190)) if round(s["size"]) == 16]
+    x0, x1 = min(s["bbox"][0] for s in spans), max(s["bbox"][2] for s in spans)
+    if align == "right":
+        assert x1 == pytest.approx(612 - 36, abs=1.5)
+    else:
+        assert (x0 + x1) / 2 == pytest.approx(306, abs=1.5)
+
+
+@pytest.mark.parametrize("align", ["center", "right"])
+def test_alignment_change_moves_short_lines_of_a_paragraph(one_pager, registry, align):
+    editor = DocumentEditor(one_pager, registry)
+    body = find_text(editor, "Our fall packages")
+    editor.apply([{"op": "editText", "id": body["id"], "runs": body["runs"], "align": align}])
+    spans = [s for s in spans_in(editor.export(), (40, 200, 340, 320)) if round(s["size"]) == 11]
+    lines: dict[int, list] = {}
+    for s in spans:
+        lines.setdefault(round(s["origin"][1]), []).append(s)
+    edges = [(min(s["bbox"][0] for s in ln), max(s["bbox"][2] for s in ln)) for ln in lines.values()]
+    x0, _y0, x1, _y1 = body["bbox"]
+    for left, right in edges:
+        if align == "center":
+            assert (left + right) / 2 == pytest.approx((x0 + x1) / 2, abs=1.5)
+        else:
+            assert right == pytest.approx(x1, abs=1.5)
+    assert any(left > x0 + 10 for left, _ in edges)  # the short last line really moved
+
+
+def test_moved_block_still_aligns_and_reports_its_box(one_pager, registry):
+    editor = DocumentEditor(one_pager, registry)
+    sub = find_text(editor, "Reach")
+    x0, y0, x1, y1 = sub["bbox"]
+    result = editor.apply([
+        {"op": "transform", "id": sub["id"], "bbox": [x0, y0 + 20, x1, y1 + 20]},  # move only
+        {"op": "editText", "id": sub["id"], "runs": sub["runs"], "align": "right"},
+    ])  # fmt: skip
+    box = result.boxes[sub["id"]]
+    assert box[2] == pytest.approx(612 - 36, abs=1.5)
+    assert box[1] == pytest.approx(y0 + 20, abs=3)
+
+
+def test_alignment_inside_a_card(one_pager, registry):
+    editor = DocumentEditor(one_pager, registry)
+    title = find_text(editor, "Morning Drive")  # left aligned inside the 350-540 card
+    editor.apply([{"op": "editText", "id": title["id"], "runs": title["runs"], "align": "center"}])
+    spans = [s for s in spans_in(editor.export(), (350, 430, 540, 460)) if round(s["size"]) == 14]
+    x0, x1 = min(s["bbox"][0] for s in spans), max(s["bbox"][2] for s in spans)
+    assert (x0 + x1) / 2 == pytest.approx(445, abs=1.5)
+
+
+def test_alignment_inside_resized_box(one_pager, registry):
+    editor = DocumentEditor(one_pager, registry)
+    sub = find_text(editor, "Reach")
+    x0, y0, _x1, y1 = sub["bbox"]
+    editor.apply([
+        {"op": "transform", "id": sub["id"], "bbox": [x0, y0, 500, y1]},
+        {"op": "editText", "id": sub["id"], "runs": sub["runs"], "align": "right"},
+    ])  # fmt: skip
+    spans = [s for s in spans_in(editor.export(), (0, 160, 612, 190)) if round(s["size"]) == 16]
+    assert max(s["bbox"][2] for s in spans) == pytest.approx(500, abs=1.5)
 
 
 def test_resizing_text_rewraps_to_new_width(one_pager, registry):

@@ -44,7 +44,8 @@ async def _read_limited(upload: UploadFile, limit: int) -> bytes:
 
 
 def _warnings_header(result) -> dict[str, str]:
-    return {"X-PDFacil-Warnings": json.dumps({"warnings": result.warnings, "notices": result.notices})}
+    report = {"warnings": result.warnings, "notices": result.notices, "boxes": result.boxes}
+    return {"X-PDFacil-Warnings": json.dumps(report)}
 
 
 @router.post("")

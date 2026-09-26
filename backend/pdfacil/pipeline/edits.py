@@ -69,6 +69,7 @@ class PageModel:
 class ApplyResult:
     warnings: list[dict] = field(default_factory=list)
     notices: list[dict] = field(default_factory=list)
+    boxes: dict[str, list[float]] = field(default_factory=dict)  # where edited text ended up
 
 
 class DocumentEditor:
@@ -260,6 +261,7 @@ class DocumentEditor:
         self, page: pymupdf.Page, el: dict, st: ElementState, result: ApplyResult, new=False
     ) -> None:
         op = st.text or {}
+        align_changed = "align" in op and op["align"] != el.get("align")
         # Block-level style changes travel with the text op.
         el = {**el, **{k: op[k] for k in ("align", "lineHeight", "letterSpacing") if k in op}}
         runs = op.get("runs") or el["runs"]
@@ -301,8 +303,14 @@ class DocumentEditor:
                 if lst:
                     x0 = lst["textX"] + dx  # item text column; markers hang to the left
                 elif not new and not resized and len(el["lines"]) == 1:
-                    # Room to grow sideways (see _single_line_span), moved along with the block.
-                    x0, x1 = (v + dx for v in self._single_line_span(page.number, el))
+                    if align_changed:
+                        # The box is only as wide as the ink, so a new alignment needs the free
+                        # space around the block to mean anything.
+                        span = self._free_span(page.number, el, margin=36.0)
+                    else:
+                        # Room to grow sideways (see _single_line_span).
+                        span = self._single_line_span(page.number, el)
+                    x0, x1 = (v + dx for v in span)
                 lines = layout_text(
                     runs,
                     x0=x0,
@@ -329,6 +337,7 @@ class DocumentEditor:
             result.warnings.append({"id": el["id"], "code": "text-overflow"})
         if lst:
             lines = lines + self._draw_list_markers(page, el, lines, marker_runs)
+        result.boxes[el["id"]] = _lines_bbox(lines, plan, el.get("letterSpacing", 0))
         write_lines(page, lines, plan, el.get("letterSpacing", 0), el.get("opacity", 1))
 
     def _draw_list_markers(self, page, el: dict, lines: list[dict], marker_runs: list[dict]):
@@ -368,22 +377,8 @@ class DocumentEditor:
         longer edit would wrap immediately. Let it grow sideways (keeping its alignment anchor)
         up to the nearest element in the same vertical band, or the page margin.
         """
-        x0, y0, x1, y1 = el["bbox"]
-        page_w = self.doc[n].rect.width
-        left, right = margin, page_w - margin
-        for other in self.page_model(n).elements.values():
-            if other["id"] == el["id"] or other.get("role") == "background":
-                continue
-            ox0, oy0, ox1, oy1 = other["bbox"]
-            if oy1 <= y0 or oy0 >= y1:
-                continue  # not in this line's band
-            if ox0 <= x0 and ox1 >= x1:
-                continue  # a container (band, card) behind the text
-            if ox1 <= x0:
-                left = max(left, ox1 + 2)
-            elif ox0 >= x1:
-                right = min(right, ox0 - 2)
-        left, right = min(left, x0), max(right, x1)
+        x0, _y0, x1, _y1 = el["bbox"]
+        left, right = self._free_span(n, el, margin)
         if el["align"] == "center":
             center = (x0 + x1) / 2
             half = min(center - left, right - center)
@@ -391,6 +386,35 @@ class DocumentEditor:
         if el["align"] == "right":
             return left, x1
         return x0, right
+
+    def _free_span(self, n: int, el: dict, margin: float) -> tuple[float, float]:
+        """The horizontal space a block could occupy: up to the nearest element in its vertical
+        band on each side, inside the card or button it sits on (keeping its padding there),
+        or ``margin`` from the page edge. Always includes the block itself."""
+        x0, y0, x1, y1 = el["bbox"]
+        page_w = self.doc[n].rect.width
+        left, right = margin, page_w - margin
+        container = None
+        for other in self.page_model(n).elements.values():
+            if other["id"] == el["id"] or other.get("role") == "background":
+                continue
+            ox0, oy0, ox1, oy1 = other["bbox"]
+            if oy1 <= y0 or oy0 >= y1:
+                continue  # not in this line's band
+            if ox0 <= x0 and ox1 >= x1:
+                # Something behind the text: a full-width band is no limit, a card is.
+                if oy0 <= y0 and oy1 >= y1 and ox1 - ox0 < page_w - 2 * margin:
+                    if container is None or (ox1 - ox0) < (container[2] - container[0]):
+                        container = (ox0, oy0, ox1, oy1)
+                continue
+            if ox1 <= x0:
+                left = max(left, ox1 + 2)
+            elif ox0 >= x1:
+                right = min(right, ox0 - 2)
+        if container:
+            pad = max(2.0, min(x0 - container[0], container[2] - x1))
+            left, right = max(left, container[0] + pad), min(right, container[2] - pad)
+        return min(left, x0), max(right, x1)
 
     # --- output ----------------------------------------------------------------------------------
 
@@ -433,6 +457,27 @@ def _first_baseline(el: dict, runs: list[dict], plan: dict[str, Renderer]) -> fl
     run = runs[0]
     font = plan[run["font"]].font_for(run["text"].strip()[:1] or "x")
     return el["bbox"][1] + font.ascender * run["size"]
+
+
+def _lines_bbox(lines: list[dict], plan: dict[str, Renderer], letter_spacing: float) -> list[float]:
+    """Bounding box of laid-out lines (advance widths, font ascent/descent)."""
+    x0 = y0 = float("inf")
+    x1 = y1 = float("-inf")
+    for line in lines:
+        x = line["x"]
+        for run in line["runs"]:
+            if not run["text"]:
+                continue
+            x = run.get("x", x)
+            renderer = plan[run["font"]]
+            font = renderer.font_for(run["text"].strip()[:1] or "x")
+            width = renderer.text_length(run["text"], run["size"]) + letter_spacing * len(run["text"])
+            width += line.get("wordSpacing", 0) * run["text"].count(" ")
+            x0, x1 = min(x0, x), max(x1, x + width)
+            y0 = min(y0, line["baseline"] - font.ascender * run["size"])
+            y1 = max(y1, line["baseline"] - font.descender * run["size"])
+            x += width
+    return [round(v, 2) for v in (x0, y0, x1, y1)] if x0 != float("inf") else []
 
 
 def write_lines(

@@ -107,7 +107,7 @@
 // changes: element id -> { edit: {runs, align, fontFallback}, bbox: [x0,y0,x1,y1], deleted }
 const state = {
   session: null, pageCount: 0, page: 0, pages: {}, changes: {}, history: [],
-  selected: null, warnings: [], fonts: [], catalog: new Map(), busy: false, scale: 1,
+  selected: null, warnings: [], boxes: {}, fonts: [], catalog: new Map(), busy: false, scale: 1,
 };
 const $ = (id) => document.getElementById(id);
 const WEIGHTS = { 100: "Thin", 200: "ExtraLight", 300: "Light", 400: "Regular", 500: "Medium", 600: "SemiBold", 700: "Bold", 800: "ExtraBold", 900: "Black" };
@@ -126,7 +126,13 @@ function opsList() {
   return ops;
 }
 
-function currentBBox(el) { return (state.changes[el.id] && state.changes[el.id].bbox) || el.bbox; }
+// Where the element is now: the server's measured box for edited text (alignment and new
+// fonts move text), else the box the user dragged it to, else where it was in the PDF.
+function currentBBox(el) {
+  const measured = state.boxes[el.id];
+  if (measured && measured.length === 4) return measured;
+  return (state.changes[el.id] && state.changes[el.id].bbox) || el.bbox;
+}
 
 function change(id, patch) {
   state.history.push(JSON.stringify(state.changes));
@@ -281,7 +287,9 @@ async function refreshPreview() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ops: opsList(), page: state.page, scale: 2 }),
     });
-    state.warnings = JSON.parse(res.headers.get("X-PDFacil-Warnings") || '{"warnings":[]}').warnings;
+    const report = JSON.parse(res.headers.get("X-PDFacil-Warnings") || "{}");
+    state.warnings = report.warnings || [];
+    state.boxes = report.boxes || {};
     const img = $("pageImg");
     const url = URL.createObjectURL(await res.blob());
     await new Promise((resolve) => { img.onload = resolve; img.src = url; });
@@ -331,8 +339,11 @@ function startDrag(e, el, box) {
   e.preventDefault();
   const resizing = e.target.classList.contains("handle");
   const start = currentBBox(el).slice();
+  // A move shifts the block's own box (so alignment keeps its room); only the corner handle
+  // sets an explicit width.
+  const base = ((state.changes[el.id] && state.changes[el.id].bbox) || el.bbox).slice();
   const sx = e.clientX, sy = e.clientY;
-  let moved = false, next = start;
+  let moved = false, next = start, commit = base;
   box.setPointerCapture(e.pointerId);
   box.classList.add("dragging");
   const onMove = (ev) => {
@@ -344,8 +355,10 @@ function startDrag(e, el, box) {
       const w = Math.max(8, x1 - x0 + dx);
       const h = el.type === "image" ? w * (y1 - y0) / (x1 - x0) : Math.max(8, y1 - y0 + dy);
       next = [x0, y0, x0 + w, y0 + h];
+      commit = next;
     } else {
       next = [x0 + dx, y0 + dy, x1 + dx, y1 + dy];
+      commit = [base[0] + dx, base[1] + dy, base[2] + dx, base[3] + dy];
     }
     placeBox(box, next);
   };
@@ -355,7 +368,7 @@ function startDrag(e, el, box) {
     box.classList.remove("dragging");
     if (moved) {
       state.selected = el.id;
-      change(el.id, { bbox: next.map((v) => Math.round(v * 100) / 100) });
+      change(el.id, { bbox: commit.map((v) => Math.round(v * 100) / 100) });
     } else {
       state.selected = el.id;
       renderOverlay();
@@ -403,6 +416,7 @@ function renderPanel() {
   body.innerHTML = `
     <textarea id="textInput"></textarea>
     ${el.list ? '<div class="meta">One item per line; markers follow the items.</div>' : ""}
+    <div class="meta">Alignment uses the free space around the block. For an exact box, drag the corner handle first.</div>
     <div class="grid">
       <label class="wide">Font <input id="fontFamily" list="fontFamilies" value="${escapeHtml(parsed.family)}" placeholder="Any Google Font"></label>
       <label>Style <select id="fontStyle"></select></label>
@@ -559,7 +573,7 @@ document.addEventListener("keydown", (e) => {
   const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
   if (d) {
     e.preventDefault();
-    const [x0, y0, x1, y1] = currentBBox(el);
+    const [x0, y0, x1, y1] = (state.changes[el.id] && state.changes[el.id].bbox) || el.bbox;
     change(el.id, { bbox: [x0 + d[0], y0 + d[1], x1 + d[0], y1 + d[1]] });
   }
 });
