@@ -24,6 +24,12 @@ def upload(client, data: bytes, name="flyer.pdf"):
     return client.post("/sessions", files={"file": (name, data, "application/pdf")})
 
 
+def test_editor_page_served(client):
+    r = client.get("/")
+    assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+    assert "PDFacil" in r.text and "/sessions" in r.text
+
+
 def test_healthz_and_source(client):
     assert client.get("/healthz").json() == {"ok": True}
     assert "github.com" in client.get("/source").json()["url"]

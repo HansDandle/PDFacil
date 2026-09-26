@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDFacil</title>
+<style>
+  :root {
+    --bg: #f4f3f0; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e2e0db;
+    --accent: #e4572e; --accent-ink: #ffffff; --warn: #b7791f; --warn-bg: #fdf3e1;
+    --box: rgba(228, 87, 46, 0.10); --box-line: rgba(228, 87, 46, 0.65); --sel: rgba(228, 87, 46, 0.22);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; letter-spacing: 0.2px; }
+  header .file { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 32ch; }
+  header .spacer { flex: 1; }
+  button, .btn { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: #c9c6bf; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.danger { color: #b3261e; }
+  main { display: grid; grid-template-columns: 1fr 340px; gap: 16px; padding: 16px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .stage { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-height: 60vh; }
+  .pages { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .pages button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .canvas { position: relative; margin: 0 auto; box-shadow: 0 1px 6px rgba(0,0,0,0.12); background: #fff; }
+  .canvas img { display: block; width: 100%; height: auto; user-select: none; }
+  .canvas.busy img { opacity: 0.55; transition: opacity 0.15s; }
+  .el { position: absolute; border: 1px solid transparent; border-radius: 2px; cursor: pointer; }
+  .el:hover { background: var(--box); border-color: var(--box-line); }
+  .el.sel { background: var(--sel); border-color: var(--accent); }
+  .el.locked { cursor: not-allowed; }
+  .el.locked:hover { background: rgba(0,0,0,0.04); border: 1px dashed #999; }
+  .el.edited { border-color: rgba(46, 125, 50, 0.7); }
+  .el .badge { position: absolute; top: -9px; right: -9px; width: 18px; height: 18px; border-radius: 50%; background: var(--warn); color: #fff; font-size: 12px; line-height: 18px; text-align: center; font-weight: 700; }
+  .drop { border: 2px dashed #cfccc4; border-radius: 12px; padding: 64px 24px; text-align: center; color: var(--muted); }
+  .drop.over { border-color: var(--accent); color: var(--ink); background: #fff7f3; }
+  .drop strong { color: var(--ink); display: block; font-size: 18px; margin-bottom: 6px; }
+  aside { display: flex; flex-direction: column; gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin: 0 0 10px; }
+  textarea { width: 100%; min-height: 150px; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .fonts li { margin: 4px 0; font-size: 13px; }
+  .fonts ul { list-style: none; padding: 0; margin: 0; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px; margin-right: 6px; background: #e8f3ea; color: #2e6b35; }
+  .tag.subset-only { background: var(--warn-bg); color: var(--warn); }
+  .tag.missing { background: #fbe4e2; color: #b3261e; }
+  .warn { background: var(--warn-bg); border: 1px solid #f1d49a; border-radius: 8px; padding: 10px; font-size: 13px; margin-top: 10px; }
+  .warn label { display: block; margin: 4px 0; }
+  .notice { background: #eef3fb; border: 1px solid #cddcf2; border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-bottom: 10px; }
+  .empty { color: var(--muted); }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 12px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PDFacil</h1>
+  <span class="file" id="fileName"></span>
+  <span class="spacer"></span>
+  <button id="undoBtn" disabled title="Undo last change (Ctrl+Z)">Undo</button>
+  <button id="resetBtn" disabled>Reset all</button>
+  <label class="btn">Open PDF<input id="fileInput" type="file" accept="application/pdf" hidden></label>
+  <button id="downloadBtn" class="primary" disabled>Download PDF</button>
+</header>
+
+<main>
+  <section class="stage">
+    <div id="notice"></div>
+    <div class="pages" id="pages"></div>
+    <div id="dropZone" class="drop">
+      <strong>Drop a PDF here</strong>
+      or use Open PDF. Canva exports keep their fonts; other PDFs open with no quality guarantee.
+    </div>
+    <div class="canvas" id="canvas" hidden><img id="pageImg" alt="Page preview"></div>
+  </section>
+
+  <aside>
+    <div class="card" id="editCard">
+      <h2>Text</h2>
+      <div id="editBody" class="empty">Click a text block on the page to edit it.</div>
+    </div>
+    <div class="card fonts">
+      <h2>Fonts</h2>
+      <div id="fontList" class="empty">No document open.</div>
+    </div>
+  </aside>
+</main>
+<footer>PDFacil is free software (AGPL-3.0). <a id="sourceLink" href="https://github.com/HansDandle/PDFacil">Source code</a></footer>
+
+<script>
+const state = {
+  session: null, pageCount: 0, page: 0, pages: {}, ops: [], history: [],
+  selected: null, warnings: [], fonts: [], busy: false,
+};
+const $ = (id) => document.getElementById(id);
+
+function textOf(el) { return el.runs.map((r) => r.text).join(""); }
+
+// New text keeps the element's styling: the dominant run's style, except characters the
+// original drew in another run (Canva draws glyphs its font lacks in a fallback font).
+function runsFor(el, text) {
+  const keys = ["font", "size", "color"];
+  const counts = new Map();
+  for (const r of el.runs) {
+    const k = JSON.stringify(keys.map((f) => r[f]));
+    counts.set(k, (counts.get(k) || 0) + r.text.trim().length);
+  }
+  const dominantKey = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const dominant = Object.fromEntries(JSON.parse(dominantKey).map((v, i) => [keys[i], v]));
+  const perChar = new Map();
+  for (const r of el.runs) {
+    if (keys.some((f) => r[f] !== dominant[f])) {
+      for (const ch of r.text) if (!perChar.has(ch)) perChar.set(ch, Object.fromEntries(keys.map((f) => [f, r[f]])));
+    }
+  }
+  const runs = [];
+  for (const ch of text) {
+    const style = perChar.get(ch) || dominant;
+    const last = runs[runs.length - 1];
+    if (last && keys.every((f) => last[f] === style[f])) last.text += ch;
+    else runs.push({ text: ch, ...style });
+  }
+  return runs.length ? runs : [{ text: "", ...dominant }];
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, options);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return res;
+}
+
+async function openPdf(file) {
+  const form = new FormData();
+  form.append("file", file);
+  setBusy(true);
+  try {
+    const res = await api("/sessions", { method: "POST", body: form });
+    const s = await res.json();
+    Object.assign(state, { session: s.id, pageCount: s.pageCount, page: 0, pages: {}, ops: [], history: [], selected: null, warnings: [] });
+    $("fileName").textContent = s.filename;
+    $("notice").innerHTML = s.notice ? `<div class="notice">${escapeHtml(s.notice)}</div>` : "";
+    $("dropZone").hidden = true;
+    $("canvas").hidden = false;
+    await loadFonts();
+    renderPageTabs();
+    await showPage(0);
+  } catch (e) {
+    alert("Could not open this PDF: " + e.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function loadFonts() {
+  const res = await api(`/sessions/${state.session}/fonts`);
+  state.fonts = (await res.json()).fonts;
+  $("fontList").className = "";
+  $("fontList").innerHTML = "<ul>" + state.fonts.map((f) =>
+    `<li><span class="tag ${f.status}">${f.status}</span>${escapeHtml(f.name)}${f.family && f.family !== f.name ? ` <span class="meta">→ ${escapeHtml(f.family)}</span>` : ""}</li>`
+  ).join("") + "</ul>";
+}
+
+function renderPageTabs() {
+  const box = $("pages");
+  box.innerHTML = "";
+  if (state.pageCount < 2) return;
+  for (let i = 0; i < state.pageCount; i++) {
+    const b = document.createElement("button");
+    b.textContent = `Page ${i + 1}`;
+    b.className = i === state.page ? "on" : "";
+    b.onclick = () => showPage(i);
+    box.appendChild(b);
+  }
+}
+
+async function showPage(n) {
+  state.page = n;
+  state.selected = null;
+  renderPageTabs();
+  if (!state.pages[n]) {
+    const res = await api(`/sessions/${state.session}/pages/${n}`);
+    state.pages[n] = await res.json();
+  }
+  await refreshPreview();
+  renderEditor();
+}
+
+async function refreshPreview() {
+  setBusy(true);
+  try {
+    const res = await api(`/sessions/${state.session}/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ops: state.ops, page: state.page, scale: 2 }),
+    });
+    const report = JSON.parse(res.headers.get("X-PDFacil-Warnings") || '{"warnings":[]}');
+    state.warnings = report.warnings;
+    const blob = await res.blob();
+    const img = $("pageImg");
+    const url = URL.createObjectURL(blob);
+    await new Promise((resolve) => { img.onload = resolve; img.src = url; });
+    renderOverlay();
+  } catch (e) {
+    alert("Preview failed: " + e.message);
+  } finally {
+    setBusy(false);
+    updateButtons();
+  }
+}
+
+function renderOverlay() {
+  const canvas = $("canvas");
+  canvas.querySelectorAll(".el").forEach((n) => n.remove());
+  const page = state.pages[state.page];
+  if (!page) return;
+  const maxWidth = canvas.parentElement.clientWidth - 24;
+  const width = Math.min(maxWidth, page.width * 1.5);
+  canvas.style.width = width + "px";
+  const k = width / page.width;
+  const edited = new Set(state.ops.map((o) => o.id));
+  const warned = new Set(state.warnings.filter((w) => w.code !== "text-overflow").map((w) => w.id));
+  for (const el of page.elements) {
+    if (el.type !== "text") continue;
+    const [x0, y0, x1, y1] = el.bbox;
+    const d = document.createElement("div");
+    d.className = "el" + (el.locked ? " locked" : "") + (state.selected === el.id ? " sel" : "") + (edited.has(el.id) ? " edited" : "");
+    Object.assign(d.style, { left: (x0 - 2) * k + "px", top: (y0 - 2) * k + "px", width: (x1 - x0 + 4) * k + "px", height: (y1 - y0 + 4) * k + "px" });
+    d.title = el.locked ? "Locked (" + (el.lockedReason || "") + ")" : textOf(el).slice(0, 80);
+    if (warned.has(el.id)) d.innerHTML = '<span class="badge">!</span>';
+    if (!el.locked) d.onclick = () => { state.selected = el.id; renderOverlay(); renderEditor(); };
+    canvas.appendChild(d);
+  }
+}
+
+function currentOp(id) { return state.ops.find((o) => o.id === id); }
+
+function renderEditor() {
+  const body = $("editBody");
+  const page = state.pages[state.page];
+  const el = page && page.elements.find((e) => e.id === state.selected);
+  if (!el) {
+    body.className = "empty";
+    body.textContent = state.session ? "Click a text block on the page to edit it." : "Open a PDF to start.";
+    return;
+  }
+  body.className = "";
+  const op = currentOp(el.id);
+  const deleted = op && op.op === "delete";
+  const text = op && op.op === "editText" ? op.runs.map((r) => r.text).join("") : textOf(el);
+  const fonts = [...new Set(el.runs.map((r) => r.font))].join(", ");
+  const listNote = el.list ? `<div class="meta">${el.list.type === "number" ? "Numbered" : "Bulleted"} list: one item per line; markers follow the items.</div>` : "";
+  body.innerHTML = `
+    <textarea id="textInput" ${deleted ? "disabled" : ""}></textarea>
+    ${listNote}
+    <div class="meta">${escapeHtml(fonts)} · ${el.runs[0].size} pt · <span class="tag ${el.fontStatus}">${el.fontStatus}</span></div>
+    <div class="row">
+      <button class="primary" id="applyBtn" ${deleted ? "disabled" : ""}>Apply</button>
+      <button id="revertBtn" ${op ? "" : "disabled"}>Revert block</button>
+      <button class="danger" id="deleteBtn" ${deleted ? "disabled" : ""}>Delete</button>
+    </div>
+    <div id="warnBox"></div>`;
+  $("textInput").value = deleted ? "(deleted)" : text;
+  $("applyBtn").onclick = () => applyEdit(el);
+  $("revertBtn").onclick = () => setOp(el.id, null);
+  $("deleteBtn").onclick = () => setOp(el.id, { op: "delete", id: el.id });
+  renderWarnings(el, op);
+}
+
+function renderWarnings(el, op) {
+  const box = $("warnBox");
+  const ws = state.warnings.filter((w) => w.id === el.id);
+  if (!ws.length) { box.innerHTML = ""; return; }
+  const parts = [];
+  for (const w of ws) {
+    if (w.code === "text-overflow") {
+      parts.push(`<div class="warn">The text no longer fits its original box and runs below it.</div>`);
+    } else if (w.code === "font-substituted" || w.code === "font-mismatch-kept") {
+      const f = w.fonts.find((x) => x.missing.length) || w.fonts[0];
+      const choice = (op && op.fontFallback) || "substitute";
+      parts.push(`<div class="warn">
+        <strong>${escapeHtml(f.font)}</strong> is missing ${f.missing.map((c) => `"${escapeHtml(c)}"`).join(", ")} in this PDF.
+        <label><input type="radio" name="fb" value="substitute" ${choice === "substitute" ? "checked" : ""}> Use ${escapeHtml(f.substitute || "a similar font")} for the whole block</label>
+        <label><input type="radio" name="fb" value="keep" ${choice === "keep" ? "checked" : ""}> Keep ${escapeHtml(f.font)}; only the missing characters differ</label>
+        <label class="btn" style="display:inline-block;margin-top:6px">Upload the real font…<input type="file" accept=".ttf,.otf" hidden id="fontUpload"></label>
+      </div>`);
+    } else if (w.code === "glyphs-missing") {
+      parts.push(`<div class="warn">${escapeHtml(w.font)} has no glyph for ${w.missing.map(escapeHtml).join(" ")}.</div>`);
+    }
+  }
+  box.innerHTML = parts.join("");
+  box.querySelectorAll('input[name="fb"]').forEach((r) => r.onchange = () => {
+    const current = currentOp(el.id);
+    if (current) setOp(el.id, { ...current, fontFallback: r.value });
+  });
+  const upload = $("fontUpload");
+  if (upload) upload.onchange = () => uploadFont(ws.find((w) => w.fonts).fonts.find((x) => x.missing.length).font, upload.files[0]);
+}
+
+async function uploadFont(name, file) {
+  if (!file) return;
+  const form = new FormData();
+  form.append("name", name);
+  form.append("file", file);
+  try {
+    await api(`/sessions/${state.session}/fonts/map`, { method: "POST", body: form });
+    await loadFonts();
+    state.pages = {};
+    await showPage(state.page);
+  } catch (e) {
+    alert("Font upload failed: " + e.message);
+  }
+}
+
+function applyEdit(el) {
+  const text = $("textInput").value;
+  const prev = currentOp(el.id);
+  const op = { op: "editText", id: el.id, runs: runsFor(el, text) };
+  if (prev && prev.fontFallback) op.fontFallback = prev.fontFallback;
+  setOp(el.id, op);
+}
+
+function setOp(id, op) {
+  state.history.push(JSON.stringify(state.ops));
+  state.ops = state.ops.filter((o) => o.id !== id);
+  if (op) state.ops.push(op);
+  refreshPreview().then(renderEditor);
+}
+
+function undo() {
+  if (!state.history.length) return;
+  state.ops = JSON.parse(state.history.pop());
+  refreshPreview().then(renderEditor);
+}
+
+async function download() {
+  setBusy(true);
+  try {
+    const res = await api(`/sessions/${state.session}/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ops: state.ops }),
+    });
+    const disposition = res.headers.get("Content-Disposition") || "";
+    const name = (disposition.match(/filename="([^"]+)"/) || [, "edited.pdf"])[1];
+    const url = URL.createObjectURL(await res.blob());
+    const a = Object.assign(document.createElement("a"), { href: url, download: name });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) {
+    alert("Export failed: " + e.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function setBusy(on) { state.busy = on; $("canvas").classList.toggle("busy", on); updateButtons(); }
+function updateButtons() {
+  $("undoBtn").disabled = state.busy || !state.history.length;
+  $("resetBtn").disabled = state.busy || !state.ops.length;
+  $("downloadBtn").disabled = state.busy || !state.session;
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+$("fileInput").onchange = (e) => e.target.files[0] && openPdf(e.target.files[0]);
+$("undoBtn").onclick = undo;
+$("resetBtn").onclick = () => { state.history.push(JSON.stringify(state.ops)); state.ops = []; refreshPreview().then(renderEditor); };
+$("downloadBtn").onclick = download;
+window.addEventListener("resize", renderOverlay);
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "z" && document.activeElement.tagName !== "TEXTAREA") { e.preventDefault(); undo(); }
+});
+const drop = $("dropZone");
+["dragenter", "dragover"].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+document.addEventListener("drop", (e) => { const f = e.dataTransfer.files[0]; if (f) openPdf(f); });
+fetch("/source").then((r) => r.json()).then((s) => { $("sourceLink").href = s.url; }).catch(() => {});
+</script>
+</body>
+</html>

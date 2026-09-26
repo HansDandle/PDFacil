@@ -8,19 +8,27 @@ A hosted, lightweight design tool for everyday Canva-style work (one-sheets, rat
 
 ## Status
 
-Backend PDF pipeline (extraction, font mapping, paragraph rebuild, edits, export) and the direct-edit API are working. Hosting, the editor UI, and design documents come next.
+Backend PDF pipeline (extraction, font mapping, paragraph rebuild, lists, edits, export), the direct-edit API, and a simple browser page for editing text in existing PDFs are working. The full design editor, hosting, and templates come next.
 
-## Development
+## Run it
 
 Requires [uv](https://docs.astral.sh/uv/). Python 3.12 is installed by uv.
 
 ```sh
-uv sync                                   # install dependencies
-uv run pytest                             # run the test suite (downloads a few Google Fonts once)
-uv run uvicorn pdfacil.main:app --reload  # API on http://localhost:8000 (docs at /docs)
+uv sync
+uv run pdfacil          # starts on http://127.0.0.1:8000 and opens your browser
 ```
 
-Try an edit on any PDF without the UI:
+Drop a PDF on the page, click a text block, edit it, and download the result. Everything runs on your computer; files are kept under `./storage`.
+
+## Development
+
+```sh
+uv run pytest                             # run the test suite (downloads a few Google Fonts once)
+uv run uvicorn pdfacil.main:app --reload  # dev server with reload (API docs at /docs)
+```
+
+Try an edit from the command line:
 
 ```sh
 uv run python scripts/edit_pdf.py flyer.pdf --list
