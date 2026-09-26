@@ -1,0 +1,50 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Fonts are never committed (many Canva fonts are licensed); they live in R2
+*.ttf
+*.otf
+*.woff
+*.woff2
+
+# Client files: real Canva exports stay private
+fixtures/private/
+*.private.pdf
+
+# Private planning docs (build spec, notes)
+private/
+
+# Local storage / temp
+storage/
+tmp/
+*.sqlite3
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Frontend
+node_modules/
+frontend/dist/
+.vite/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local caches (downloaded test fonts)
+.cache/
