@@ -30,6 +30,14 @@ FALLBACK_CHOICES = [SUBSTITUTE, KEEP, "upload"]
 
 SANS, SERIF, DISPLAY, MONO = "sans", "serif", "display", "mono"
 
+GOOGLE_CATEGORIES = {
+    "Sans Serif": SANS,
+    "Serif": SERIF,
+    "Display": DISPLAY,
+    "Handwriting": DISPLAY,
+    "Monospace": MONO,
+}
+
 # Fetched from Google Fonts when the fonts table has nothing in the right classification.
 DEFAULT_POOL = {
     SANS: ["Open Sans", "Roboto", "Montserrat"],
@@ -297,8 +305,11 @@ class FontPlanner:
         return self._candidates
 
     def _candidate(self, rf: ResolvedFont):
-        data = self.registry.path(rf).read_bytes()
-        classification = classify_font_data(data, rf.postscript_name + " " + rf.family)
+        entry = self.registry.google.entry(rf.family) if self.registry.google else None
+        classification = GOOGLE_CATEGORIES.get(entry.category) if entry else None
+        if classification is None:
+            data = self.registry.path(rf).read_bytes()
+            classification = classify_font_data(data, rf.postscript_name + " " + rf.family)
         profile = FontProfile(classification or SANS, rf.weight, rf.italic)
         return rf, self.registry.load(rf), profile
 

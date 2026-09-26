@@ -156,6 +156,19 @@ def build_one_pager(fonts: dict[str, Path]) -> bytes:
                             fonts=F.__getitem__):  # fmt: skip
         _write(page, line["x"], line["baseline"], line["runs"][0]["text"], body, 10, DARK)
 
+    # Bulleted list: bullets are separate shapes, one item wraps onto a second line.
+    items = [
+        ["Morning drive mentions"],
+        ["Streaming pre-roll on the app and", "website for all twelve weeks"],
+        ["Weekly reporting"],
+    ]
+    y = 280
+    for item in items:
+        page.draw_circle((355, y - 3.5), 2, color=None, fill=DARK)
+        for line in item:
+            _write(page, 362, y, line, body, 10, DARK)
+            y += 14
+
     # Centered two-line block.
     for i, text in enumerate(("Spots from $25 per week", "Custom packages available")):
         _write(page, _centered_x(text, regular, 14, 306), 340 + i * 20, text, regular, 14, ORANGE)
@@ -169,6 +182,8 @@ def build_one_pager(fonts: dict[str, Path]) -> bytes:
     # A card shape with text on it, and a circle.
     page.draw_rect(pymupdf.Rect(350, 420, 540, 580), color=ORANGE, fill=WHITE, width=2, radius=0.08)
     _write(page, 366, 450, "Morning Drive", bold, 14, DARK)
+    label = "Mon-Fri 6-10am"
+    _write(page, _centered_x(label, body, 11, 445), 560, label, body, 11, ORANGE)
     page.draw_circle((390, 630), 30, color=None, fill=ORANGE)
 
     # Headline exported as outlines (no text layer).

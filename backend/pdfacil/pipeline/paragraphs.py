@@ -56,6 +56,46 @@ class VisualLine:
     def size(self) -> float:
         return self.style[1]
 
+    @property
+    def first_word_width(self) -> float:
+        """Width of the line's first word, from the extracted character positions."""
+        start = None
+        for s in self.spans:
+            for ch, x0, x1 in zip(s.text, s.char_origins, s.char_right, strict=False):
+                if ch.isspace():
+                    if start is not None:
+                        return x0 - start
+                    continue
+                if start is None:
+                    start = x0
+                end = x1
+        return end - start if start is not None else 0.0
+
+
+BULLET_CHARS = "•◦▪▫‣⁃●○■□–-*"
+
+
+def starts_list_item(line: VisualLine, markers) -> bool:
+    """A bullet glyph at the start, or a small bullet shape just left of the line."""
+    if line.text.lstrip()[:1] in BULLET_CHARS and len(line.text.strip()) > 1:
+        return True
+    top, bottom = line.baseline - line.size, line.baseline
+    return any(
+        line.x0 - 3 * line.size <= m[0] and m[2] <= line.x0 + 1 and m[1] < bottom and m[3] > top
+        for m in markers
+    )
+
+
+def is_hard_break(prev: VisualLine, nxt: VisualLine, box_width: float, markers=()) -> bool:
+    """A wrapped line is too full for the next line's first word; if that word would have fit,
+    the author broke the line on purpose (list items, addresses, short lines)."""
+    if starts_list_item(nxt, markers):
+        return True
+    if prev.text.rstrip().endswith("-"):
+        return False
+    space = 0.28 * prev.size
+    return (prev.x1 - prev.x0) + space + nxt.first_word_width <= box_width - EDGE_TOLERANCE
+
 
 def visual_lines(lines: list[Line]) -> list[VisualLine]:
     """Join horizontal line fragments that share a baseline and sit next to each other."""
@@ -135,10 +175,23 @@ def build_blocks(lines: list[Line]) -> list[Block]:
     return blocks
 
 
-def infer_alignment(block: Block, page_width: float) -> str:
+def infer_alignment(block: Block, page_width: float, containers=()) -> str:
+    """containers: rects of shapes behind the text (cards, buttons); centering on any of
+    them, or on the page, counts as centered."""
     lines = block.lines
+    x0, x1 = min(ln.x0 for ln in lines), max(ln.x1 for ln in lines)
+    top, bottom = lines[0].baseline - lines[0].size, lines[-1].baseline
+    centers = [page_width / 2] + [
+        (c[0] + c[2]) / 2
+        for c in containers
+        if c[0] - 1 <= x0 and x1 <= c[2] + 1 and c[1] - 1 <= top and bottom <= c[3] + 1
+    ]
+
+    def centered(line: VisualLine, tol: float) -> bool:
+        return any(abs(line.center - c) <= tol for c in centers)
+
     if len(lines) == 1:
-        return "center" if abs(lines[0].center - page_width / 2) <= 3 else "left"
+        return "center" if centered(lines[0], 3) else "left"
     first = lines[0]
     body = set.intersection(*[_edges(first, ln) for ln in lines[1:-1]]) if len(lines) > 2 else None
     widest = max(ln.x1 - ln.x0 for ln in lines)
@@ -152,7 +205,7 @@ def infer_alignment(block: Block, page_width: float) -> str:
         return "justified"
     if len(block.align) == 1:
         return next(iter(block.align))
-    if "center" in block.align and abs(first.center - page_width / 2) <= 2:
+    if "center" in block.align and centered(first, 2):
         return "center"
     for side in ("left", "center", "right"):
         if side in block.align:
@@ -187,7 +240,9 @@ def _merge_runs(runs: list[dict]) -> list[dict]:
     return merged
 
 
-def block_to_element(block: Block, element_id: str, page_width: float) -> dict:
+def block_to_element(block: Block, element_id: str, page_width: float, containers=(), markers=()) -> dict:
+    """containers: shapes behind text (for centering); markers: small shapes that may be
+    bullets (for list item breaks)."""
     spans = [s for ln in block.lines for s in ln.spans]
     x0 = min(ln.x0 for ln in block.lines)
     x1 = max(ln.x1 for ln in block.lines)
@@ -200,8 +255,11 @@ def block_to_element(block: Block, element_id: str, page_width: float) -> dict:
         line_runs = _runs_for(ln.spans, with_positions=False)
         line_runs[0]["text"] = line_runs[0]["text"].lstrip()
         line_runs[-1]["text"] = line_runs[-1]["text"].rstrip()
-        if i < len(block.lines) - 1 and not line_runs[-1]["text"].endswith("-"):
-            line_runs[-1]["text"] += " "
+        if i < len(block.lines) - 1:
+            if is_hard_break(ln, block.lines[i + 1], x1 - x0, markers):
+                line_runs[-1]["text"] += "\n"
+            elif not line_runs[-1]["text"].endswith("-"):
+                line_runs[-1]["text"] += " "
         flat.extend(r for r in line_runs if r["text"])
 
     size = block.lines[0].size
@@ -213,7 +271,7 @@ def block_to_element(block: Block, element_id: str, page_width: float) -> dict:
         "bbox": [round(v, 2) for v in (x0, y0, x1, y1)],
         "rotation": 0,
         "opacity": 1,
-        "align": infer_alignment(block, page_width),
+        "align": infer_alignment(block, page_width, containers),
         "lineHeight": round(pitch / size, 3) if pitch else 1.2,
         "letterSpacing": round(median(letter_spacings), 2) if letter_spacings else 0,
         "locked": False,

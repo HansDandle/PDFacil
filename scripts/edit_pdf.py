@@ -24,13 +24,38 @@ def block_text(element: dict) -> str:
     return "".join(r["text"] for r in element["runs"])
 
 
+def replacement_runs(element: dict, text: str) -> list[dict]:
+    """Style new text like the element: the dominant run's style, except characters the
+    original drew in another run (Canva draws glyphs its font lacks, such as curly quotes,
+    in a fallback font) keep that run's style."""
+    style_keys = ("font", "size", "color")
+    counts: dict[tuple, int] = {}
+    per_char: dict[str, dict] = {}
+    for run in element["runs"]:
+        key = tuple(run[k] for k in style_keys)
+        counts[key] = counts.get(key, 0) + len(run["text"].strip())
+    dominant = dict(zip(style_keys, max(counts, key=counts.__getitem__), strict=True))
+    for run in element["runs"]:
+        if any(run[k] != dominant[k] for k in style_keys):
+            for ch in run["text"]:
+                per_char.setdefault(ch, {k: run[k] for k in style_keys})
+    runs: list[dict] = []
+    for ch in text:
+        style = per_char.get(ch, dominant)
+        if runs and all(runs[-1][k] == style[k] for k in style_keys):
+            runs[-1]["text"] += ch
+        else:
+            runs.append({"text": ch, **style})
+    return runs
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("pdf", type=Path)
     parser.add_argument("find", nargs="?", help="start of the text block to replace")
     parser.add_argument("replace", nargs="?", help="new text for the block")
     parser.add_argument("-o", "--out", type=Path)
-    parser.add_argument("-p", "--page", type=int, default=0)
+    parser.add_argument("-p", "--page", type=int, help="only this page (default: all pages)")
     parser.add_argument("--list", action="store_true", help="list text blocks and fonts")
     parser.add_argument("--keep-font", action="store_true", help='use fontFallback "keep"')
     args = parser.parse_args()
@@ -44,12 +69,20 @@ def main() -> int:
         print(r.json()["detail"], file=sys.stderr)
         return 1
     sid = r.json()["id"]
-    page = client.get(f"/sessions/{sid}/pages/{args.page}").json()
-    texts = [e for e in page["elements"] if e["type"] == "text"]
+    if r.json()["notice"]:
+        print("note:", r.json()["notice"])
+    pages = [args.page] if args.page is not None else range(r.json()["pageCount"])
+    texts = []
+    for n in pages:
+        page = client.get(f"/sessions/{sid}/pages/{n}").json()
+        texts.extend(e for e in page["elements"] if e["type"] == "text")
 
     if args.list or not args.find or args.replace is None:
         for f in client.get(f"/sessions/{sid}/fonts").json()["fonts"]:
-            print(f"font  {f['status']:<12} {f['name']}  ->  {f['mappedTo']}")
+            target = f"{f['family']} ({f['source']})" if f["family"] else "-"
+            print(f"font  {f['status']:<12} {f['name']}  ->  {target}")
+        if not texts:
+            print("no text on these pages (images or outlined text only)")
         for e in texts:
             lock = " [locked]" if e["locked"] else ""
             print(f"{e['id']:<8} {e['align']:<9} {e['fontStatus']:<12} {block_text(e)[:70]!r}{lock}")
@@ -59,7 +92,7 @@ def main() -> int:
     if target is None:
         print(f"no text block starts with {args.find!r} (use --list)", file=sys.stderr)
         return 1
-    op = {"op": "editText", "id": target["id"], "runs": [{**target["runs"][0], "text": args.replace}]}
+    op = {"op": "editText", "id": target["id"], "runs": replacement_runs(target, args.replace)}
     if args.keep_font:
         op["fontFallback"] = "keep"
     r = client.post(f"/sessions/{sid}/export", json={"ops": [op]})
@@ -71,9 +104,10 @@ def main() -> int:
     report = json.loads(r.headers["X-PDFacil-Warnings"])
     for w in report["warnings"] + report["notices"]:
         print("warning:", w)
+    page_no = int(target["id"].split("-")[0][1:])
     for label, data in (("before", args.pdf.read_bytes()), ("after", r.content)):
         doc = pymupdf.open(stream=data, filetype="pdf")
-        doc[args.page].get_pixmap(dpi=144).save(out.with_name(f"{out.stem}-{label}.png"))
+        doc[page_no].get_pixmap(dpi=144).save(out.with_name(f"{out.stem}-{label}.png"))
     print(f"wrote {out}")
     return 0
 

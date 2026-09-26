@@ -15,6 +15,13 @@ CACHE = Path(__file__).resolve().parent.parent / ".cache" / "fonts"
 class CachedGoogleFonts(GoogleFonts):
     """Google Fonts with an on-disk cache so the suite downloads each font once."""
 
+    def catalog_text(self) -> str:
+        path = CACHE / "metadata.json"
+        if not path.exists():
+            CACHE.mkdir(parents=True, exist_ok=True)
+            path.write_text(super().catalog_text(), encoding="utf-8")
+        return path.read_text(encoding="utf-8")
+
     def fetch(self, spec: FontSpec) -> bytes | None:
         key = CACHE / f"{spec.family.replace(' ', '_')}-{spec.weight}-{int(spec.italic)}.ttf"
         miss = key.with_suffix(".miss")

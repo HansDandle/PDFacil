@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +36,21 @@ _WEIGHTS = {
     "extrabold": 800, "ultrabold": 800,
     "black": 900, "heavy": 900,
 }  # fmt: skip
+
+
+# PDF standard fonts and common system fonts are licensed; these open fonts share their
+# character widths exactly, so text keeps its measured width and line breaks.
+METRIC_COMPATIBLE = {
+    "helvetica": "Arimo",
+    "arial": "Arimo",
+    "arialmt": "Arimo",
+    "times": "Tinos",
+    "timesnewroman": "Tinos",
+    "timesnewromanps": "Tinos",
+    "courier": "Cousine",
+    "couriernew": "Cousine",
+    "couriernewps": "Cousine",
+}
 
 
 def strip_subset_prefix(name: str) -> str:
@@ -76,6 +92,8 @@ def parse_postscript_name(name: str) -> FontSpec:
             tail.insert(0, words.pop())
         family, style = " ".join(words), "".join(tail)
     style = style.lower().replace(" ", "").replace("-", "")
+    if style.endswith("mt") or style.endswith("ps"):  # Arial-BoldMT, TimesNewRomanPS-BoldMT
+        style = style[:-2]
     italic = "italic" in style or "oblique" in style
     style = style.replace("italic", "").replace("oblique", "")
     return FontSpec(split_camel(family), _WEIGHTS.get(style, 400), italic)
@@ -100,21 +118,104 @@ def read_font_names(data: bytes) -> FontNames:
     return FontNames(ps, family, weight, italic)
 
 
+@dataclass(frozen=True)
+class CatalogEntry:
+    family: str
+    category: str  # "Sans Serif", "Serif", "Display", "Handwriting", "Monospace"
+    styles: frozenset[str]  # "400", "700i", ...
+    width_range: tuple[float, float] | None = None  # wdth axis, when the family has one
+
+
+# "Open Sans Condensed" left the catalog when Open Sans gained a width axis; Canva still
+# exports the old names. Map width words to wdth axis values (CSS font-stretch percentages).
+_WIDTHS = {
+    "ultracondensed": 50.0,
+    "extracondensed": 62.5,
+    "condensed": 75.0,
+    "semicondensed": 87.5,
+    "semiexpanded": 112.5,
+    "expanded": 125.0,
+    "extraexpanded": 150.0,
+}
+_WIDTH_SUFFIX = re.compile(r"^(.+?)\s+((?:ultra|extra|semi)?\s*(?:condensed|expanded))$", re.I)
+
+
 class GoogleFonts:
-    """Looks fonts up in the Google Fonts catalog and downloads static TTF files."""
+    """Looks fonts up in the open Google Fonts catalog and downloads static TTF files.
+
+    The CSS API also serves licensed fonts used by Google Docs (it answers "Helvetica" with
+    Helvetica LT Pro), so every lookup is checked against the catalog metadata first: only
+    open-source catalog families, in a style the family actually has, are downloaded.
+    """
 
     CSS_URL = "https://fonts.googleapis.com/css2"
+    METADATA_URL = "https://fonts.google.com/metadata/fonts"
     # An old user agent makes the CSS API return TrueType URLs instead of WOFF2.
     USER_AGENT = "Mozilla/4.0"
 
     def __init__(self, client: httpx.Client | None = None):
         self.client = client or httpx.Client(timeout=20, follow_redirects=True)
+        self._catalog: dict[str, CatalogEntry] | None = None
+
+    def catalog_text(self) -> str:
+        resp = self.client.get(self.METADATA_URL)
+        resp.raise_for_status()
+        return resp.text
+
+    def catalog(self) -> dict[str, CatalogEntry]:
+        if self._catalog is None:
+            try:
+                text = self.catalog_text()
+                data = json.loads(text[text.index("{") :])  # response starts with ")]}'"
+            except (httpx.HTTPError, ValueError):
+                return {}  # unavailable: fetch nothing rather than risk licensed fonts
+            catalog = {}
+            for f in data.get("familyMetadataList", []):
+                # isBrandFont marks Google's own families (Noto, Roboto); they are still OFL.
+                if not f.get("isOpenSource", False):
+                    continue
+                wdth = next((a for a in f.get("axes", []) if a.get("tag") == "wdth"), None)
+                catalog[f["family"].lower()] = CatalogEntry(
+                    f["family"],
+                    f.get("category", ""),
+                    frozenset(f.get("fonts", {})),
+                    (wdth["min"], wdth["max"]) if wdth else None,
+                )
+            self._catalog = catalog
+        return self._catalog
+
+    def entry(self, family: str) -> CatalogEntry | None:
+        return self.catalog().get(family.lower())
+
+    def locate(self, family: str) -> tuple[CatalogEntry, float] | None:
+        """Catalog entry and wdth value for a family name, e.g. "Open Sans Condensed" ->
+        (Open Sans, 75). Real catalog families such as "Roboto Condensed" win."""
+        entry = self.entry(family)
+        if entry:
+            return entry, 100.0
+        match = _WIDTH_SUFFIX.match(family.strip())
+        if not match:
+            return None
+        base = self.entry(match.group(1))
+        width = _WIDTHS.get(match.group(2).replace(" ", "").lower())
+        if base is None or width is None or base.width_range is None:
+            return None
+        low, high = base.width_range
+        return (base, width) if low <= width <= high else None
 
     def fetch(self, spec: FontSpec) -> bytes | None:
-        axis = f"ital,wght@{int(spec.italic)},{spec.weight}"
+        located = self.locate(spec.family)
+        style = f"{spec.weight}{'i' if spec.italic else ''}"
+        if located is None or style not in located[0].styles:
+            return None
+        entry, width = located
+        if width == 100.0:
+            query = f"{entry.family}:ital,wght@{int(spec.italic)},{spec.weight}"
+        else:
+            query = f"{entry.family}:ital,wdth,wght@{int(spec.italic)},{width:g},{spec.weight}"
         resp = self.client.get(
             self.CSS_URL,
-            params={"family": f"{spec.family}:{axis}"},
+            params={"family": query},
             headers={"User-Agent": self.USER_AGENT},
         )
         if resp.status_code != 200:
@@ -186,6 +287,9 @@ class FontRegistry:
         if found or self.google is None or font_key(name) in self._google_misses:
             return found
         spec = parse_postscript_name(name)
+        compatible = METRIC_COMPATIBLE.get(font_key(spec.family))
+        if compatible:
+            spec = FontSpec(compatible, spec.weight, spec.italic)
         try:
             data = self.google.fetch(spec)
         except httpx.HTTPError:
@@ -193,6 +297,12 @@ class FontRegistry:
         if data is None:
             self._google_misses.add(font_key(name))
             return None
+        if compatible or self.google.entry(spec.family) is None:
+            # A stand-in (Arimo for Helvetica) or a width instance (Open Sans at wdth 75 for
+            # "Open Sans Condensed"): the file's own name may belong to a different font, so
+            # register it only under the requested name.
+            source = "metric" if compatible else "google"
+            return self.register_file(data, None, source, "Google Fonts", name=name)
         font = self.register_file(data, owner=None, source="google", license_note="Google Fonts")
         if font_key(font.postscript_name) != font_key(name):
             font = self.add_alias(name, font, owner=None)
@@ -204,19 +314,22 @@ class FontRegistry:
         owner: str | None,
         source: str = "upload",
         license_note: str | None = None,
+        name: str | None = None,
     ) -> ResolvedFont:
+        """Store a font file and index it under ``name`` (default: its PostScript name)."""
         names = read_font_names(data)
+        name = strip_subset_prefix(name or names.postscript_name)
         ext = "otf" if data[:4] == b"OTTO" else "ttf"
         digest = hashlib.sha256(data).hexdigest()[:20]
         key = f"fonts/{owner or 'shared'}/{digest}.{ext}"
         if not self.storage.exists(key):
             self.storage.put(key, data)
-        existing = self.lookup(names.postscript_name, owner)
+        existing = self.lookup(name, owner)
         if existing and existing.owner == owner and existing.object_key == key:
             return existing
         row = Font(
-            postscript_name=names.postscript_name,
-            lookup_key=font_key(names.postscript_name),
+            postscript_name=name,
+            lookup_key=font_key(name),
             family=names.family,
             weight=names.weight,
             style="italic" if names.italic else "normal",
@@ -230,7 +343,9 @@ class FontRegistry:
             db.commit()
         return _to_resolved(row)
 
-    def add_alias(self, name: str, target: ResolvedFont, owner: str | None) -> ResolvedFont:
+    def add_alias(
+        self, name: str, target: ResolvedFont, owner: str | None, source: str = "alias"
+    ) -> ResolvedFont:
         """Make ``name`` resolve to ``target``'s file (used for manual font mapping)."""
         row = Font(
             postscript_name=strip_subset_prefix(name),
@@ -240,7 +355,7 @@ class FontRegistry:
             style="italic" if target.italic else "normal",
             owner=owner,
             object_key=target.object_key,
-            source="alias",
+            source=source,
         )
         with self.session_factory() as db:
             db.add(row)
@@ -282,6 +397,7 @@ class DocFont:
             "status": self.status,
             "pages": self.pages,
             "mappedTo": self.resolved.postscript_name if self.resolved else None,
+            "family": self.resolved.family if self.resolved else None,
             "source": self.resolved.source if self.resolved else None,
         }
 

@@ -47,6 +47,45 @@ def test_registry_fetches_google_font_and_aliases(registry):
     assert registry.load(font).has_glyph(ord("A"))
 
 
+def test_licensed_fonts_are_never_downloaded(google):
+    # The CSS API answers "Helvetica" with licensed Helvetica LT Pro; the catalog check stops it.
+    assert google.fetch(FontSpec("Helvetica")) is None
+    assert google.fetch(FontSpec("Arimo", 900)) is None  # style the family does not have
+    assert google.fetch(FontSpec("Arimo", 700)) is not None
+
+
+@pytest.mark.parametrize(
+    "name, family, weight, italic",
+    [
+        ("Helvetica-Bold", "Arimo", 700, False),
+        ("Helvetica-Oblique", "Arimo", 400, True),
+        ("ArialMT", "Arimo", 400, False),
+        ("Times-Roman", "Tinos", 400, False),
+        ("TimesNewRomanPS-BoldMT", "Tinos", 700, False),
+        ("Courier", "Cousine", 400, False),
+    ],
+)
+def test_standard_fonts_map_to_metric_compatible(registry, name, family, weight, italic):
+    font = registry.resolve(name)
+    assert (font.family, font.weight, font.italic, font.source) == (family, weight, italic, "metric")
+
+
+def test_google_brand_families_are_allowed(registry):
+    # Noto and Roboto are flagged as Google "brand" fonts in the catalog but are OFL-licensed.
+    assert registry.resolve("NotoSans-Bold") is not None
+
+
+def test_condensed_name_maps_to_width_axis(registry):
+    condensed = registry.resolve("OpenSansCondensed-Bold")
+    normal = registry.resolve("OpenSans-Bold")
+    assert condensed is not None and normal is not None
+    assert condensed.object_key != normal.object_key
+    ratio = registry.load(condensed).text_length("MMMM", 10) / registry.load(normal).text_length("MMMM", 10)
+    assert ratio < 0.9
+    # The width instance must not take over the normal-width name.
+    assert registry.lookup("OpenSans-Bold").object_key == normal.object_key
+
+
 def test_registry_unknown_font(registry):
     assert registry.resolve("Zqxvern-Regular") is None
 

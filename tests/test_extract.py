@@ -60,6 +60,26 @@ def test_centered_two_line_block(page_json):
     assert len(el["lines"]) == 2
 
 
+def test_list_items_keep_hard_breaks(page_json):
+    el = next(e for t, e in texts(page_json).items() if t.startswith("Morning drive"))
+    text = "".join(r["text"] for r in el["runs"])
+    assert text == (
+        "Morning drive mentions\n"
+        "Streaming pre-roll on the app and website for all twelve weeks\n"
+        "Weekly reporting"
+    )
+
+
+def test_wrapped_paragraph_has_no_hard_breaks(page_json):
+    body = next(e for t, e in texts(page_json).items() if t.startswith("Our fall packages"))
+    assert "\n" not in "".join(r["text"] for r in body["runs"])
+
+
+def test_centered_inside_card(page_json):
+    assert texts(page_json)["Mon-Fri 6-10am"]["align"] == "center"
+    assert texts(page_json)["Morning Drive"]["align"] == "left"
+
+
 def test_rotated_text_locked(page_json):
     el = texts(page_json)["SIDEBAR"]
     assert el["locked"] and el["lockedReason"] == "rotated-text"

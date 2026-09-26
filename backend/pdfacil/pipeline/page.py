@@ -30,8 +30,14 @@ def build_page_elements(ex: PageExtraction, fonts: dict[str, DocFont]) -> list[d
     keyed: list[tuple[int, dict]] = []
 
     text_kinds = ("fill-text", "stroke-text", "ignore-text")
+    containers = [g.bbox for g in ex.drawings if not g.background and not g.outlined_text]
+    markers = [
+        b for b in containers
+        if 0 < b[2] - b[0] <= 24 and 0 < b[3] - b[1] <= 24
+        and 0.5 <= (b[2] - b[0]) / (b[3] - b[1]) <= 2
+    ]  # fmt: skip
     for i, block in enumerate(build_blocks(ex.lines)):
-        el = block_to_element(block, f"p{n}-t{i}", ex.width)
+        el = block_to_element(block, f"p{n}-t{i}", ex.width, containers, markers)
         keyed.append((_text_z(ex, el, text_kinds), el))
     rotated = [ln for ln in ex.lines if not ln.horizontal and ln.text.strip()]
     for i, line in enumerate(rotated):
