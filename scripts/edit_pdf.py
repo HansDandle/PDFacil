@@ -34,6 +34,9 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="list text blocks and fonts")
     parser.add_argument("--keep-font", action="store_true", help='use fontFallback "keep"')
     args = parser.parse_args()
+    if not args.pdf.is_file():
+        print(f"file not found: {args.pdf}", file=sys.stderr)
+        return 1
 
     client = TestClient(create_app())
     r = client.post("/sessions", files={"file": (args.pdf.name, args.pdf.read_bytes())})
