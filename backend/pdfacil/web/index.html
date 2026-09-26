@@ -37,7 +37,12 @@
   .el.locked:hover { background: rgba(0,0,0,0.04); border: 1px dashed #999; }
   .el.edited:not(.sel) { border-color: rgba(46, 125, 50, 0.7); }
   .el .badge { position: absolute; top: -9px; right: -9px; width: 18px; height: 18px; border-radius: 50%; background: var(--warn); color: #fff; font-size: 12px; line-height: 18px; text-align: center; font-weight: 700; pointer-events: none; }
-  .el .handle { position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; background: #fff; border: 2px solid var(--accent); border-radius: 2px; cursor: nwse-resize; }
+  .el .handle { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; background: #fff; border: 2px solid var(--accent); border-radius: 2px; z-index: 4; }
+  .h-nw { left: 0; top: 0; cursor: nwse-resize; } .h-n { left: 50%; top: 0; cursor: ns-resize; } .h-ne { left: 100%; top: 0; cursor: nesw-resize; }
+  .h-w { left: 0; top: 50%; cursor: ew-resize; } .h-e { left: 100%; top: 50%; cursor: ew-resize; }
+  .h-sw { left: 0; top: 100%; cursor: nesw-resize; } .h-s { left: 50%; top: 100%; cursor: ns-resize; } .h-se { left: 100%; top: 100%; cursor: nwse-resize; }
+  .el.clipped-top { border-top-style: dashed; } .el.clipped-bottom { border-bottom-style: dashed; }
+  .el.clipped-left { border-left-style: dashed; } .el.clipped-right { border-right-style: dashed; }
   .drop { border: 2px dashed #cfccc4; border-radius: 12px; padding: 64px 24px; text-align: center; color: var(--muted); }
   .drop.over { border-color: var(--accent); color: var(--ink); background: #fff7f3; }
   .drop strong { color: var(--ink); display: block; font-size: 18px; margin-bottom: 6px; }
@@ -322,22 +327,57 @@ function renderOverlay() {
     d.title = el.locked ? "Locked (" + (el.lockedReason || "") + ")" : (el.type === "text" ? textOf(el).slice(0, 80) : el.type);
     if (warned.has(el.id)) d.insertAdjacentHTML("beforeend", '<span class="badge">!</span>');
     if (!el.locked) {
-      if (state.selected === el.id) d.insertAdjacentHTML("beforeend", '<span class="handle"></span>');
+      if (state.selected === el.id) {
+        for (const h of handlesFor(el)) d.insertAdjacentHTML("beforeend", `<span class="handle h-${h}" data-h="${h}"></span>`);
+      }
       d.addEventListener("pointerdown", (e) => startDrag(e, el, d));
     }
     canvas.appendChild(d);
   }
 }
 
+// Images resize from the corners (keeping proportions), text only changes width, shapes
+// can be resized from any side.
+function handlesFor(el) {
+  if (el.type === "image") return ["nw", "ne", "sw", "se"];
+  if (el.type === "text") return ["w", "e"];
+  return ["nw", "n", "ne", "w", "e", "sw", "s", "se"];
+}
+
+// Boxes are drawn clipped to the page (Canva bleeds backgrounds past the edges); a dashed
+// side means the element continues off the page.
 function placeBox(d, [x0, y0, x1, y1]) {
+  const page = state.pages[state.page];
   const k = state.scale, pad = 2;
-  Object.assign(d.style, { left: (x0 - pad) * k + "px", top: (y0 - pad) * k + "px", width: (x1 - x0 + 2 * pad) * k + "px", height: (y1 - y0 + 2 * pad) * k + "px" });
+  const cx0 = Math.max(x0 - pad, 0), cy0 = Math.max(y0 - pad, 0);
+  const cx1 = Math.min(x1 + pad, page.width), cy1 = Math.min(y1 + pad, page.height);
+  Object.assign(d.style, { left: cx0 * k + "px", top: cy0 * k + "px", width: Math.max(cx1 - cx0, 2) * k + "px", height: Math.max(cy1 - cy0, 2) * k + "px" });
+  d.classList.toggle("clipped-left", x0 < 0);
+  d.classList.toggle("clipped-top", y0 < 0);
+  d.classList.toggle("clipped-right", x1 > page.width);
+  d.classList.toggle("clipped-bottom", y1 > page.height);
+}
+
+function resized([x0, y0, x1, y1], handle, dx, dy, keepRatio) {
+  const min = 4;
+  let nx0 = x0, ny0 = y0, nx1 = x1, ny1 = y1;
+  if (handle.includes("w")) nx0 = Math.min(x0 + dx, x1 - min);
+  if (handle.includes("e")) nx1 = Math.max(x1 + dx, x0 + min);
+  if (handle.includes("n")) ny0 = Math.min(y0 + dy, y1 - min);
+  if (handle.includes("s")) ny1 = Math.max(y1 + dy, y0 + min);
+  if (keepRatio) {
+    const ratio = (y1 - y0) / (x1 - x0);
+    const h = (nx1 - nx0) * ratio;
+    if (handle.includes("n")) ny0 = ny1 - h; else ny1 = ny0 + h;
+  }
+  return [nx0, ny0, nx1, ny1];
 }
 
 function startDrag(e, el, box) {
   if (state.busy) return;
   e.preventDefault();
-  const resizing = e.target.classList.contains("handle");
+  const handle = e.target.dataset.h || null;
+  const resizing = !!handle;
   const start = currentBBox(el).slice();
   // A move shifts the block's own box (so alignment keeps its room); only the corner handle
   // sets an explicit width.
@@ -352,9 +392,7 @@ function startDrag(e, el, box) {
     if (!moved) return;
     const [x0, y0, x1, y1] = start;
     if (resizing) {
-      const w = Math.max(8, x1 - x0 + dx);
-      const h = el.type === "image" ? w * (y1 - y0) / (x1 - x0) : Math.max(8, y1 - y0 + dy);
-      next = [x0, y0, x0 + w, y0 + h];
+      next = resized(start, handle, dx, dy, el.type === "image");
       commit = next;
     } else {
       next = [x0 + dx, y0 + dy, x1 + dx, y1 + dy];
@@ -391,7 +429,7 @@ function renderPanel() {
   if (!el) {
     $("panelTitle").textContent = "Selection";
     body.className = "empty";
-    body.innerHTML = state.session ? "Click something on the page to edit it. Drag to move; drag the corner handle to resize." : "Open a PDF to start.";
+    body.innerHTML = state.session ? "Click something on the page to edit it. Drag to move; drag the handles to resize." : "Open a PDF to start.";
     return;
   }
   body.className = "";
@@ -399,7 +437,7 @@ function renderPanel() {
   const moved = c.bbox ? '<button id="resetPosBtn">Reset position</button>' : "";
   if (el.type !== "text") {
     $("panelTitle").textContent = el.type === "image" ? "Image" : "Shape";
-    body.innerHTML = `<div class="hint">Drag to move. Drag the corner handle to resize${el.type === "image" ? " (keeps proportions)" : ""}. Arrow keys nudge 1 pt, Shift+arrow 10 pt.</div>
+    body.innerHTML = `<div class="hint">Drag to move. Drag the ${el.type === "image" ? "corner handles to resize (keeps proportions)" : "handles on any side to resize"}. A dashed side means it continues off the page. Arrow keys nudge 1 pt, Shift+arrow 10 pt.</div>
       <div class="row">${moved}<button class="danger" id="deleteBtn">Delete</button></div>`;
     $("deleteBtn").onclick = () => { state.selected = null; change(el.id, { deleted: true }); };
     if (c.bbox) $("resetPosBtn").onclick = () => change(el.id, { bbox: null });
@@ -416,7 +454,7 @@ function renderPanel() {
   body.innerHTML = `
     <textarea id="textInput"></textarea>
     ${el.list ? '<div class="meta">One item per line; markers follow the items.</div>' : ""}
-    <div class="meta">Alignment uses the free space around the block. For an exact box, drag the corner handle first.</div>
+    <div class="meta">Alignment uses the free space around the block. For an exact box, drag the side handles first.</div>
     <div class="grid">
       <label class="wide">Font <input id="fontFamily" list="fontFamilies" value="${escapeHtml(parsed.family)}" placeholder="Any Google Font"></label>
       <label>Style <select id="fontStyle"></select></label>

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import pymupdf
 
 from ..layout import layout_text
+from .content import page_do_calls
 from .extract import extract_page
 from .fallback import SUBSTITUTE, FontPlanner, Renderer
 from .fonts import FontRegistry
@@ -158,12 +159,25 @@ class DocumentEditor:
 
         # 0. Images first: rewrite each placement in the original content stream (keeps z-order
         #    and image bytes). Redactions below rewrite the stream and rename its resources.
+        #    Shapes painted directly by the page get the same treatment, so a resized shape
+        #    stays behind the text on it. Last command first, so a rewrite (or a deletion)
+        #    never shifts the index of a command still to be rewritten.
+        inplace: list[tuple[int, dict, ElementState, str | None]] = []
         for el, st in images:
+            if st.deleted or st.bbox:
+                inplace.append((el["source"]["do"], el, st, el["xref"]))
+        fallback_shapes = []
+        for el, st in shapes:
+            calls = [p.get("call") for p in model.drawings[el["id"]]]
+            if calls and all(c is not None for c in calls):
+                inplace.extend((c, el, st, None) for c in calls)
+            else:
+                fallback_shapes.append((el, st))
+        for index, el, st, name in sorted(inplace, key=lambda item: item[0], reverse=True):
             new_bbox = None if st.deleted else st.bbox
-            if new_bbox is None and not st.deleted:
-                continue
-            if not self._rewrite_image(page, el, new_bbox):
-                raise OpError(f"could not locate image placement for {el['id']}")
+            if not self._rewrite_call(page, index, el["bbox"], new_bbox, name):
+                raise OpError(f"could not locate the drawing command for {el['id']}")
+        shapes = fallback_shapes
 
         # 1. Remove original text of edited, moved or deleted text elements.
         if texts:
@@ -231,31 +245,31 @@ class DocumentEditor:
             }
             self._write_element(page, el, ElementState(text=op), result, new=True)
 
-    def _rewrite_image(self, page: pymupdf.Page, el: dict, new_bbox) -> bool:
-        name = el["source"]["name"]
-        target = el["source"]["occurrence"]
-        pattern = re.compile(rb"/" + re.escape(name.encode()) + rb"\s+Do\b")
+    def _rewrite_call(self, page: pymupdf.Page, index, old_bbox, new_bbox, image_xref: int | None) -> bool:
+        """Move/resize (new_bbox) or delete (None) one drawing command in place, in the page
+        content or the form it sits in: an image ``Do`` (``image_xref`` given) or a path."""
+        calls = page_do_calls(self.doc, page)
+        if index is None or index >= len(calls):
+            return False
+        call = calls[index]
+        if image_xref is not None and (call.kind != "do" or call.target != image_xref):
+            return False
+        if image_xref is None and call.kind != "path":
+            return False
+        stream = self.doc.xref_stream(call.stream)
+        original = stream[call.start : call.end]
         if new_bbox is None:
             replacement = b""
         else:
-            # PyMuPDF's placement matrix M maps the image's unit square (flipped: F) to page
-            # space, i.e. M = F * CTM * T. For a page-space move D the new CTM is X * CTM with
-            # X = F * M * D * M^-1 * F, which is what gets prepended as "X cm" before the Do.
-            m = pymupdf.Matrix(el["source"]["matrix"])
-            f = pymupdf.Matrix(1, 0, 0, -1, 0, 1)
-            x = f * m * _move_matrix(el["bbox"], new_bbox) * ~m * f
+            # The command's CTM C maps its own space to PDF space; page space is C * T. For a
+            # page-space move D the new CTM is C * T * D * T^-1, i.e. X * C with
+            # X = C * T * D * T^-1 * C^-1, applied by wrapping the command in "q X cm ... Q".
+            c, t = call.ctm, page.transformation_matrix
+            x = c * t * _move_matrix(old_bbox, new_bbox) * ~t * ~c
             nums = " ".join(f"{v:.6f}" for v in (x.a, x.b, x.c, x.d, x.e, x.f))
-            replacement = f"q {nums} cm /{name} Do Q".encode()
-        seen = 0
-        for xref in page.get_contents():
-            stream = self.doc.xref_stream(xref)
-            for match in pattern.finditer(stream):
-                if seen == target:
-                    new = stream[: match.start()] + replacement + stream[match.end() :]
-                    self.doc.update_stream(xref, new)
-                    return True
-                seen += 1
-        return False
+            replacement = f"q {nums} cm\n".encode() + original + b"\nQ"
+        self.doc.update_stream(call.stream, stream[: call.start] + replacement + stream[call.end :])
+        return True
 
     def _write_element(
         self, page: pymupdf.Page, el: dict, st: ElementState, result: ApplyResult, new=False

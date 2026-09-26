@@ -294,6 +294,61 @@ def test_resize_shape_leaves_neighbors(one_pager, registry):
     assert changed_outside(render(one_pager), render(out), [[360, 600, 440, 680]]) == 0
 
 
+def test_resizing_a_shape_keeps_it_behind_its_text(one_pager, registry):
+    editor = DocumentEditor(one_pager, registry)
+    band = next(
+        e for e in elements(editor).values() if e["type"] == "shape" and e["bbox"] == [0.0, 0.0, 612.0, 130.0]
+    )
+    assert all(p.get("call") is not None for p in editor.page_model(0).drawings[band["id"]])
+    result = editor.apply([{"op": "transform", "id": band["id"], "bbox": [0, 0, 612, 90]}])
+    assert not result.notices  # no "shape-on-top" fallback
+    out = editor.export()
+    img = render(out)
+    # Band now ends at 90 pt: cream below it, orange above it.
+    assert tuple(img[int(100 * 2), 20][:3]) == pytest.approx((255, 248, 238), abs=3)
+    assert img[int(80 * 2), 20][0] > 200 and img[int(80 * 2), 20][2] < 90
+    # The white headline still paints over the band (it would be hidden if the band were
+    # redrawn on top): some pixels inside the headline box are white.
+    head = find_text(editor, "Fall Underwriting")
+    x0, y0, x1, y1 = (int(v * 2) for v in head["bbox"])
+    region = img[y0:y1, x0:x1]
+    assert (region.min(axis=2) > 240).sum() > 500
+
+
+def test_shapes_and_images_inside_a_form_are_edited_in_place(registry):
+    """Canva groups elements into Form XObjects; edits must reach inside them."""
+    from tests.fixtures.synthetic import _gradient
+
+    group = pymupdf.open()
+    gp = group.new_page(width=200, height=100)
+    gp.draw_rect(pymupdf.Rect(10, 10, 110, 60), color=None, fill=(0.2, 0.4, 0.8))
+    gp.insert_image(pymupdf.Rect(120, 10, 190, 80), pixmap=_gradient(70, 70))
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=300)
+    page.show_pdf_page(pymupdf.Rect(50, 50, 250, 150), group, 0)  # drawn once, as a form
+    page.insert_text((60, 200), "Caption", fontsize=12)
+    pdf = doc.tobytes()
+
+    editor = DocumentEditor(pdf, registry)
+    els = editor.page_model(0).elements
+    box = next(e for e in els.values() if e["type"] == "shape" and not e["locked"])
+    img = next(e for e in els.values() if e["type"] == "image")
+    assert not img["locked"]
+    assert all(p.get("call") is not None for p in editor.page_model(0).drawings[box["id"]])
+
+    result = editor.apply([
+        {"op": "transform", "id": box["id"], "bbox": [60, 160, 160, 185]},
+        {"op": "transform", "id": img["id"], "bbox": [300, 50, 370, 120]},
+    ])  # fmt: skip
+    assert not result.notices  # no remove-and-redraw fallback
+    out = pymupdf.open(stream=editor.export(), filetype="pdf")[0]
+    fills = [d["rect"] for d in out.get_drawings() if d.get("fill") and d["fill"][2] > 0.7]
+    assert any(all(abs(a - b) < 0.5 for a, b in zip(r, (60, 160, 160, 185), strict=True)) for r in fills)
+    assert not any(abs(r.x0 - 60) < 0.5 and abs(r.y0 - 55) < 0.5 for r in fills)
+    images = [pymupdf.Rect(i["bbox"]) for i in out.get_image_info()]
+    assert any(all(abs(a - b) < 0.5 for a, b in zip(r, (300, 50, 370, 120), strict=True)) for r in images)
+
+
 def test_delete_text(one_pager, registry):
     editor = DocumentEditor(one_pager, registry)
     footer = find_text(editor, "KXYZ")

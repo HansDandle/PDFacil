@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
+from .content import match_path, match_placement, page_do_calls
 from .fonts import strip_subset_prefix
 
 TEXT_FLAGS = (
@@ -97,6 +98,7 @@ class ImagePlacement:
     smask: int
     occurrence: int  # nth placement of this image on the page, in paint order
     in_form: bool  # placed inside a Form XObject rather than the page content
+    do_index: int | None = None  # index of its Do in content.page_do_calls()
 
 
 @dataclass
@@ -155,12 +157,21 @@ def extract_spans(page: pymupdf.Page) -> list[Line]:
     return lines
 
 
-def extract_images(page: pymupdf.Page) -> list[ImagePlacement]:
+def extract_images(page: pymupdf.Page, calls=None) -> list[ImagePlacement]:
+    """Image placements. Each is matched by geometry to the page-level ``Do`` that draws it;
+    placements drawn only inside a Form XObject have none and are treated as nested."""
+    calls = page_do_calls(page.parent, page) if calls is None else calls
+    used: set[int] = set()
     placements = []
-    for xref, smask, _w, _h, _bpc, _cs, _alt, name, _filter, referencer in page.get_images(full=True):
+    for xref, smask, _w, _h, _bpc, _cs, _alt, name, _filter, _referencer in page.get_images(full=True):
         for k, (rect, matrix) in enumerate(page.get_image_rects(xref, transform=True)):
             if rect.is_empty or rect.is_infinite:
                 continue
+            candidates = [i for i in range(len(calls)) if i not in used]
+            index = match_placement([calls[i] for i in candidates], page, xref, rect)
+            do_index = candidates[index] if index is not None else None
+            if do_index is not None:
+                used.add(do_index)
             placements.append(
                 ImagePlacement(
                     xref=xref,
@@ -169,10 +180,19 @@ def extract_images(page: pymupdf.Page) -> list[ImagePlacement]:
                     matrix=tuple(round(v, 6) for v in matrix),
                     smask=smask,
                     occurrence=k,
-                    in_form=referencer != 0,
+                    in_form=do_index is None,
+                    do_index=do_index,
                 )
             )
-    return placements
+    # PyMuPDF finds image placements by content, so identical copies of one image each
+    # report every copy's position. A placement with no Do of its own at a position that
+    # another image's Do already covers is such a phantom: drop it.
+    claimed = [p.bbox for p in placements if p.do_index is not None]
+    return [
+        p for p in placements
+        if p.do_index is not None
+        or not any(all(abs(a - b) <= 1.0 for a, b in zip(p.bbox, c, strict=True)) for c in claimed)
+    ]  # fmt: skip
 
 
 def _style_key(path: dict) -> tuple:
@@ -254,12 +274,26 @@ def _clip_shapes(page: pymupdf.Page) -> dict[int, list]:
     return shapes
 
 
-def extract_drawings(page: pymupdf.Page, text_rects: list[pymupdf.Rect]) -> list[DrawingGroup]:
+def extract_drawings(page: pymupdf.Page, text_rects: list[pymupdf.Rect], calls=None) -> list[DrawingGroup]:
     clipped = _clip_shapes(page)
+    calls = page_do_calls(page.parent, page) if calls is None else calls
+    after = -1
     paths = []
     for p in page.get_drawings():
-        if (p["rect"].is_empty and not p["items"]) or not _visible(p):
+        if p["rect"].is_empty and not p["items"]:
             continue
+        # The path command that paints it (both lists are in painting order), so moves can be
+        # made in place. Invisible paths still claim their command so they can't be mistaken
+        # for a visible one with the same geometry.
+        curved = any(item[0] in ("c", "qu") for item in p["items"])
+        call = match_path(calls, page, p["rect"], after, curved)
+        if call is not None:
+            after = call
+            if calls[call].shared:
+                call = None
+        if not _visible(p):
+            continue
+        p = {**p, "call": call}
         if p["seqno"] in clipped:
             p = {**p, "items": clipped[p["seqno"]], "closePath": True, "clipShape": True}
         paths.append(p)
@@ -317,12 +351,13 @@ def extract_drawings(page: pymupdf.Page, text_rects: list[pymupdf.Rect]) -> list
 def extract_page(page: pymupdf.Page) -> PageExtraction:
     lines = extract_spans(page)
     text_rects = [pymupdf.Rect(s.bbox) for line in lines for s in line.spans if s.text.strip()]
+    calls = page_do_calls(page.parent, page)
     return PageExtraction(
         index=page.number,
         width=page.rect.width,
         height=page.rect.height,
         lines=lines,
-        images=extract_images(page),
-        drawings=extract_drawings(page, text_rects),
+        images=extract_images(page, calls),
+        drawings=extract_drawings(page, text_rects, calls),
         paint_log=[(kind, rect_tuple(r)) for kind, r in page.get_bboxlog()],
     )

@@ -66,7 +66,7 @@ def build_page_elements(ex: PageExtraction, fonts: dict[str, DocFont]) -> list[d
             "bbox": list(img.bbox),
             "xref": img.xref,
             "locked": img.in_form,
-            "source": {"name": img.name, "occurrence": img.occurrence, "matrix": list(img.matrix)},
+            "source": {"name": img.name, "do": img.do_index, "matrix": list(img.matrix)},
         }
         if img.in_form:
             el["lockedReason"] = "nested-image"
