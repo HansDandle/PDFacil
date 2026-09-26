@@ -34,6 +34,7 @@ class DoCall:
     owner: int | None = None  # xref of the Form XObject it sits in (None: page content)
     shared: bool = False  # inside a form drawn more than once: not editable in place
     target: int | None = None  # xref the Do draws (names are local to each form's resources)
+    group: tuple | None = None  # (start, end, CTM at start) of the q...Q group it alone fills
 
 
 PAINT_OPS = {"f", "F", "f*", "S", "s", "B", "B*", "b", "b*", "n"}
@@ -149,7 +150,7 @@ def page_do_calls(doc: pymupdf.Document, page: pymupdf.Page) -> list[DoCall]:
     def scan(
         stream_xrefs: list[int], ctm: pymupdf.Matrix, resources: dict[str, int], depth: int, owner: int | None
     ):
-        stack: list[pymupdf.Matrix] = []
+        stack: list[tuple] = []
         for xref in stream_xrefs:
             data = doc.xref_stream(xref) or b""
             operands: list = []
@@ -179,9 +180,13 @@ def page_do_calls(doc: pymupdf.Document, page: pymupdf.Page) -> list[DoCall]:
                         calls.append(call)
                     path_start, points = None, []
                 elif value == "q":
-                    stack.append(pymupdf.Matrix(ctm))
+                    stack.append((pymupdf.Matrix(ctm), xref, start, len(calls)))
                 elif value == "Q":
-                    ctm = stack.pop() if stack else ctm
+                    if stack:
+                        saved, q_stream, q_start, first = stack.pop()
+                        if q_stream == xref:
+                            blocks.append((xref, q_start, end, saved, first, len(calls) - 1))
+                        ctm = saved
                 elif value == "cm" and len(nums) >= 6:
                     ctm = pymupdf.Matrix(*nums[-6:]) * ctm  # PDF: CTM' = M x CTM (row vectors)
                 elif value == "Do" and operands and operands[-1][0] == "name":
@@ -197,9 +202,24 @@ def page_do_calls(doc: pymupdf.Document, page: pymupdf.Page) -> list[DoCall]:
                         scan([target], _form_matrix(doc, target) * ctm, inner, depth + 1, target)
                 operands = []
 
+    blocks: list[tuple] = []  # (stream, q start, Q end, CTM at q, first call, last call)
     scan(page.get_contents(), pymupdf.Matrix(1, 0, 0, 1, 0, 0), _xobjects(doc, page.xref), 0, None)
     for call in calls:
         call.shared = call.owner is not None and uses.get(call.owner, 0) > 1
+
+    # The outermost q...Q group around each command that draws nothing else (clip paths
+    # aside). Canva wraps every element as "q <clip> W n q <cm> <element> Q Q": moving the
+    # whole group moves the clip window along with the element.
+    def draws(i: int) -> bool:
+        return not (calls[i].kind == "path" and calls[i].name == "n")
+
+    for stream, q_start, q_end, saved, first, last in blocks:
+        drawing = [i for i in range(first, last + 1) if draws(i)]
+        if len(drawing) != 1:
+            continue
+        call = calls[drawing[0]]
+        if call.stream == stream and (call.group is None or q_start < call.group[0]):
+            call.group = (q_start, q_end, saved)
     return calls
 
 

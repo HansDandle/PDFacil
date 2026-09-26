@@ -257,18 +257,20 @@ class DocumentEditor:
         if image_xref is None and call.kind != "path":
             return False
         stream = self.doc.xref_stream(call.stream)
-        original = stream[call.start : call.end]
         if new_bbox is None:
-            replacement = b""
+            # Delete just the drawing command; its group (clip, marked content) stays balanced.
+            start, end, replacement = call.start, call.end, b""
         else:
-            # The command's CTM C maps its own space to PDF space; page space is C * T. For a
-            # page-space move D the new CTM is C * T * D * T^-1, i.e. X * C with
-            # X = C * T * D * T^-1 * C^-1, applied by wrapping the command in "q X cm ... Q".
-            c, t = call.ctm, page.transformation_matrix
+            # Move the command's whole q...Q group when it has one, so a clip window around it
+            # moves too (Canva clips every element to its own frame). With C the CTM at the
+            # start of what is wrapped, page space is C * T; for a page-space move D the new
+            # CTM is C * T * D * T^-1 = X * C with X = C * T * D * T^-1 * C^-1.
+            start, end, c = call.group if call.group else (call.start, call.end, call.ctm)
+            t = page.transformation_matrix
             x = c * t * _move_matrix(old_bbox, new_bbox) * ~t * ~c
             nums = " ".join(f"{v:.6f}" for v in (x.a, x.b, x.c, x.d, x.e, x.f))
-            replacement = f"q {nums} cm\n".encode() + original + b"\nQ"
-        self.doc.update_stream(call.stream, stream[: call.start] + replacement + stream[call.end :])
+            replacement = f"q {nums} cm\n".encode() + stream[start:end] + b"\nQ"
+        self.doc.update_stream(call.stream, stream[:start] + replacement + stream[end:])
         return True
 
     def _write_element(

@@ -349,6 +349,29 @@ def test_shapes_and_images_inside_a_form_are_edited_in_place(registry):
     assert any(all(abs(a - b) < 0.5 for a, b in zip(r, (300, 50, 370, 120), strict=True)) for r in images)
 
 
+def test_moving_a_clipped_image_moves_its_clip(registry):
+    """Canva draws each element as 'q <clip> W n q <cm> /Im Do Q Q'; moving only the image
+    would slide it out of its clip window and it would vanish."""
+    from tests.fixtures.synthetic import _gradient
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=300)
+    page.insert_image(pymupdf.Rect(20, 20, 380, 26), pixmap=_gradient(360, 6))  # a thin divider
+    xref = page.get_contents()[0]
+    stream = doc.xref_stream(xref)
+    # Wrap the image in a clip window exactly around it (PDF coordinates: y up).
+    doc.update_stream(xref, b"q 20 274 360 6 re W* n\n" + stream + b"\nQ")
+    pdf = doc.tobytes()
+
+    editor = DocumentEditor(pdf, registry)
+    img = next(e for e in editor.page_model(0).elements.values() if e["type"] == "image")
+    editor.apply([{"op": "transform", "id": img["id"], "bbox": [20, 200, 380, 206]}])
+    out = editor.export()
+    pix = render(out, scale=1)
+    assert pix[203, 200].tolist() != [255, 255, 255]  # visible at the new position
+    assert pix[23, 200].tolist() == [255, 255, 255]  # gone from the old one
+
+
 def test_delete_text(one_pager, registry):
     editor = DocumentEditor(one_pager, registry)
     footer = find_text(editor, "KXYZ")
