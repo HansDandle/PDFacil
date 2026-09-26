@@ -22,6 +22,7 @@ from ..layout import layout_text
 from .extract import extract_page
 from .fallback import SUBSTITUTE, FontPlanner, Renderer
 from .fonts import FontRegistry
+from .lists import marker_text
 from .page import build_page_elements
 
 TEXT_BAND = (0.3, 0.7)  # vertical slice of each span box used for redaction
@@ -165,12 +166,21 @@ class DocumentEditor:
                 text=pymupdf.PDF_REDACT_TEXT_REMOVE,
             )
 
-        # 2. Remove shapes; restore any other paths the redaction took with them.
-        if shapes:
+        # 2. Remove shapes (and the bullet shapes of edited lists); restore any other paths
+        #    the redaction took with them.
+        list_markers = [
+            (rect, el["source"]["markerSeqnos"])
+            for el, _ in texts
+            if el.get("list", {}).get("marker") == "shape"
+            for rect in el["source"]["markerRects"]
+        ]
+        if shapes or list_markers:
             edited_seqnos = {p["seqno"] for el, _ in shapes for p in model.drawings[el["id"]]}
+            edited_seqnos |= {s for _, seqnos in list_markers for s in seqnos}
             areas = []
-            for el, _ in shapes:
-                area = pymupdf.Rect(el["bbox"]) + (-0.5, -0.5, 0.5, 0.5)
+            rects = [el["bbox"] for el, _ in shapes] + [rect for rect, _ in list_markers]
+            for rect in rects:
+                area = pymupdf.Rect(rect) + (-0.5, -0.5, 0.5, 0.5)
                 areas.append(area)
                 page.add_redact_annot(area, fill=False, cross_out=False)
             page.apply_redactions(
@@ -252,7 +262,18 @@ class DocumentEditor:
         runs = op.get("runs") or el["runs"]
         lines = op.get("lines")
         choice = op.get("fontFallback", SUBSTITUTE)
-        all_runs = runs + [r for ln in (lines or []) for r in ln["runs"]]
+        lst = el.get("list")
+        marker_runs = []
+        if lst and lst["marker"] != "shape":
+            style = lst.get("glyph") or lst.get("number")
+            items = "".join(r["text"] for r in runs).count("\n") + 1
+            if lines:
+                items = max(items, sum(1 for ln in lines if ln.get("listItem")))
+            marker_runs = [
+                {"text": marker_text(lst, k), **{f: style[f] for f in ("font", "size", "color")}}
+                for k in range(items)
+            ]
+        all_runs = runs + [r for ln in (lines or []) for r in ln["runs"]] + marker_runs
         plan, warnings = self.planner.plan(el["id"], all_runs, choice)
         result.warnings.extend(warnings)
 
@@ -266,7 +287,9 @@ class DocumentEditor:
             else:
                 first = el["lines"][0]["baseline"] + dy if el["lines"] else _first_baseline(el, runs, plan)
                 x0, x1 = box[0], box[2]
-                if not new and not st.bbox and len(el["lines"]) == 1:
+                if lst:
+                    x0 = lst["textX"] + dx  # item text column; markers hang to the left
+                elif not new and not st.bbox and len(el["lines"]) == 1:
                     x0, x1 = self._single_line_span(page.number, el)
                 lines = layout_text(
                     runs,
@@ -277,6 +300,7 @@ class DocumentEditor:
                     line_height=el["lineHeight"],
                     letter_spacing=el["letterSpacing"],
                     fonts=lambda name: plan[name],
+                    list_items=bool(lst),
                 )
         if shift:
             lines = [
@@ -287,7 +311,39 @@ class DocumentEditor:
 
         if lines and lines[-1]["baseline"] > box[3] + 0.5:
             result.warnings.append({"id": el["id"], "code": "text-overflow"})
+        if lst:
+            lines = lines + self._draw_list_markers(page, el, lines, marker_runs)
         write_lines(page, lines, plan, el.get("letterSpacing", 0), el.get("opacity", 1))
+
+    def _draw_list_markers(self, page, el: dict, lines: list[dict], marker_runs: list[dict]):
+        """One marker per item start (lines flagged listItem), at the original offset from the
+        item text. Shape markers are drawn now; glyph and number markers are returned as extra
+        text lines for write_lines."""
+        lst = el["list"]
+        off = lst["offset"]
+        extra = []
+        template = []
+        if lst["marker"] == "shape":
+            seqnos = set(el["source"]["markerTemplate"])
+            template = [p for p in self.page_model(page.number).all_paths if p["seqno"] in seqnos]
+            t_rect = pymupdf.Rect(template[0]["rect"])
+            for p in template[1:]:
+                t_rect |= p["rect"]
+        k = 0
+        for line in lines:
+            if not line.get("listItem"):
+                continue
+            x, y = line["x"], line["baseline"]
+            if lst["marker"] == "shape":
+                target = pymupdf.Rect(x + off[0], y + off[1], x + off[2], y + off[3])
+                _draw_paths(page, template, _move_matrix(t_rect, target))
+            else:
+                run = marker_runs[min(k, len(marker_runs) - 1)]
+                if lst["marker"] == "number":
+                    run = {**run, "text": marker_text(lst, k)}
+                extra.append({"x": x + off[0], "baseline": y, "runs": [run]})
+            k += 1
+        return extra
 
     def _single_line_span(self, n: int, el: dict, margin: float = 18.0) -> tuple[float, float]:
         """Horizontal room for a single-line block.
@@ -332,15 +388,28 @@ class DocumentEditor:
     def background_png(self, n: int, scale: float = 2.0) -> bytes:
         """Page render with every editable text element removed (the editor's locked layer)."""
         page = self.doc[n]
-        for el in self.page_model(n).elements.values():
-            if el["type"] == "text" and not el["locked"]:
-                for rect in el["source"]["spanRects"]:
-                    page.add_redact_annot(_text_band(rect), fill=False, cross_out=False)
+        editable = [
+            el for el in self.page_model(n).elements.values() if el["type"] == "text" and not el["locked"]
+        ]
+        for el in editable:
+            for rect in el["source"]["spanRects"]:
+                page.add_redact_annot(_text_band(rect), fill=False, cross_out=False)
         page.apply_redactions(
             images=pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
             text=pymupdf.PDF_REDACT_TEXT_REMOVE,
         )
+        markers = [r for el in editable for r in el["source"].get("markerRects", [])]
+        if markers:  # list bullets are drawn by the editor with their items
+            for rect in markers:
+                page.add_redact_annot(
+                    pymupdf.Rect(rect) + (-0.5, -0.5, 0.5, 0.5), fill=False, cross_out=False
+                )
+            page.apply_redactions(
+                images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+                text=pymupdf.PDF_REDACT_TEXT_NONE,
+            )
         return self.render_png(n, scale)
 
 

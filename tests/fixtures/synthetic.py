@@ -169,6 +169,14 @@ def build_one_pager(fonts: dict[str, Path]) -> bytes:
             _write(page, 362, y, line, body, 10, DARK)
             y += 14
 
+    # Bullet characters as text, and a numbered list, in the lower left.
+    for i, item in enumerate(("Free remote broadcast", "Logo on the event banner")):
+        _write(page, 72, 614 + i * 14, "•", body, 10, DARK)
+        _write(page, 82, 614 + i * 14, item, body, 10, DARK)
+    for i, item in enumerate(("Sign the agreement", "Send your logo", "Approve the copy")):
+        _write(page, 72, 656 + i * 14, f"{i + 1}.", body, 10, DARK)
+        _write(page, 84, 656 + i * 14, item, body, 10, DARK)
+
     # Centered two-line block.
     for i, text in enumerate(("Spots from $25 per week", "Custom packages available")):
         _write(page, _centered_x(text, regular, 14, 306), 340 + i * 20, text, regular, 14, ORANGE)

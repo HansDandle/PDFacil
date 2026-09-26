@@ -55,9 +55,14 @@ class Span:
 
     @property
     def letter_spacing(self) -> float:
-        """Average extra space between characters, in points (Canva tracking)."""
-        gaps = [self.char_origins[i + 1] - self.char_right[i] for i in range(len(self.char_origins) - 1)]
-        return sum(gaps) / len(gaps) if gaps else 0.0
+        """Typical extra space between characters, in points (Canva tracking).
+
+        Median, not mean: tracking is uniform, while one positioned gap (a bullet followed by
+        its item text, justified words) is an outlier that must not look like tracking."""
+        gaps = sorted(
+            self.char_origins[i + 1] - self.char_right[i] for i in range(len(self.char_origins) - 1)
+        )
+        return gaps[len(gaps) // 2] if gaps else 0.0
 
     @property
     def style(self) -> tuple[str, float, str]:
@@ -212,8 +217,52 @@ def _find_outlined_text(paths: list[dict], text_rects: list[pymupdf.Rect]) -> li
     return [c for c in clusters if len(c) >= 3]
 
 
+def _visible(path: dict) -> bool:
+    fill = path.get("fill") is not None and (path.get("fill_opacity") or 0) > 0
+    stroke = path.get("color") is not None and (path.get("stroke_opacity") or 0) > 0
+    return fill or stroke
+
+
+def _clip_shapes(page: pymupdf.Page) -> dict[int, list]:
+    """Visible outline of filled rectangles that sit inside a curved clip of the same size.
+
+    Canva draws round bullets and rounded images as a filled square clipped to a circle;
+    the clip path is the shape the reader actually sees. Maps path seqno -> clip items.
+    """
+    shapes: dict[int, list] = {}
+    clips: list[dict] = []
+    for d in page.get_drawings(extended=True):
+        level = d.get("level", 0)
+        while clips and clips[-1].get("level", 0) >= level:
+            clips.pop()
+        if d.get("type") == "clip":
+            clips.append(d)
+            continue
+        if d.get("seqno") is None or d.get("type") not in ("f", "fs"):
+            continue
+        if not all(item[0] == "re" for item in d.get("items", [])):
+            continue
+        rect = pymupdf.Rect(d["rect"])
+        for clip in reversed(clips):
+            items = clip.get("items") or []
+            scissor = pymupdf.Rect(clip.get("scissor") or pymupdf.EMPTY_RECT())
+            if any(i[0] in ("c", "qu") for i in items) and all(
+                abs(a - b) <= 1.0 for a, b in zip(scissor, rect, strict=True)
+            ):
+                shapes[d["seqno"]] = items
+                break
+    return shapes
+
+
 def extract_drawings(page: pymupdf.Page, text_rects: list[pymupdf.Rect]) -> list[DrawingGroup]:
-    paths = [p for p in page.get_drawings() if not p["rect"].is_empty or p["items"]]
+    clipped = _clip_shapes(page)
+    paths = []
+    for p in page.get_drawings():
+        if (p["rect"].is_empty and not p["items"]) or not _visible(p):
+            continue
+        if p["seqno"] in clipped:
+            p = {**p, "items": clipped[p["seqno"]], "closePath": True, "clipShape": True}
+        paths.append(p)
     page_area = page.rect.width * page.rect.height
 
     outlined = _find_outlined_text(paths, text_rects)

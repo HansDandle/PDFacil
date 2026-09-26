@@ -197,8 +197,8 @@ def test_delete_text(one_pager, registry):
 def test_add_text(one_pager, registry):
     editor = DocumentEditor(one_pager, registry)
     run = {"text": "New line", "font": "Open Sans Regular", "size": 12, "color": "#1A1A1A"}
-    editor.apply([{"op": "addText", "page": 0, "bbox": [72, 600, 300, 630], "runs": [run]}])
-    spans = spans_in(editor.export(), (72, 598, 300, 640))
+    editor.apply([{"op": "addText", "page": 0, "bbox": [120, 715, 300, 740], "runs": [run]}])
+    spans = spans_in(editor.export(), (120, 712, 300, 745))
     assert [s["text"] for s in spans] == ["New line"]
 
 

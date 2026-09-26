@@ -57,7 +57,10 @@ def layout_text(
     line_height: float = 1.2,
     letter_spacing: float = 0.0,
     fonts: FontLoader,
+    list_items: bool = False,
 ) -> list[dict]:
+    """Lines with x/baseline/runs. With ``list_items``, the first line of every paragraph
+    (each item of a list) is flagged ``listItem`` so the export draws its marker."""
     width = x1 - x0
     lines: list[list[dict]] = [[]]
     hard_end: list[bool] = []
@@ -67,7 +70,9 @@ def layout_text(
             lines.append([])
             continue
         current = lines[-1]
-        if current and _width([*current, piece], fonts, letter_spacing, trim=True) > width + 0.01:
+        # Half a point of slack: extracted boxes come from ink extents, which can be a hair
+        # narrower than the advance widths measured here.
+        if current and _width([*current, piece], fonts, letter_spacing, trim=True) > width + 0.5:
             hard_end.append(False)
             lines.append([piece])
         else:
@@ -96,5 +101,7 @@ def layout_text(
         line = {"x": round(x, 3), "baseline": round(baseline, 3), "runs": _merge(pieces)}
         if word_spacing:
             line["wordSpacing"] = round(word_spacing, 4)
+        if list_items and (i == 0 or hard_end[i - 1]):
+            line["listItem"] = True
         out.append(line)
     return out

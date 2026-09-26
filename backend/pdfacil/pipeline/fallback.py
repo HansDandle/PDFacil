@@ -53,14 +53,15 @@ _WEIGHT_NAMES = {
 
 @dataclass
 class FontProfile:
-    classification: str
+    classification: str | None  # None when unknown
     weight: int
     italic: bool
 
 
 def classify_name(name: str) -> str | None:
     n = name.lower()
-    if any(k in n for k in ("mono", "code", "courier", "consol")):
+    # Not a bare "code": Canva's "Code" font is a display sans.
+    if re.search(r"mono|source ?code|fira ?code|courier|consol", n):
         return MONO
     if "sans" in n or "grotesk" in n or "gothic" in n:
         return SANS
@@ -78,12 +79,44 @@ def _classify_by_glyphs(tt: TTFont) -> str | None:
     if hmtx and ord("i") in cmap and ord("m") in cmap:
         if hmtx[cmap[ord("i")]][0] == hmtx[cmap[ord("m")]][0]:
             return MONO
-    if ord("I") in cmap:
-        pen = RecordingPen()
-        tt.getGlyphSet()[cmap[ord("I")]].draw(pen)
-        segments = sum(1 for op, _ in pen.value if op in ("lineTo", "qCurveTo", "curveTo"))
-        return SERIF if segments > 6 else SANS
+    for ch in "Il":
+        ratio = _serif_ratio(tt, cmap.get(ord(ch)))
+        if ratio is not None:
+            return SERIF if ratio > 1.6 else SANS
     return None
+
+
+def _serif_ratio(tt: TTFont, glyph_name: str | None) -> float | None:
+    """Full width of a stem letter ("I", "l") divided by its stem width at mid-height.
+    About 1 for sans (a plain bar), well above 1.6 when serifs stick out."""
+    if glyph_name is None:
+        return None
+    pen = RecordingPen()
+    tt.getGlyphSet()[glyph_name].draw(pen)
+    contours, current = [], []
+    for op, args in pen.value:
+        if op == "moveTo":
+            current = [args[0]]
+        elif op in ("lineTo", "qCurveTo", "curveTo"):
+            current.extend(args)  # control points approximate straight stems well enough
+        elif op in ("closePath", "endPath") and current:
+            contours.append(current)
+            current = []
+    points = [p for c in contours for p in c]
+    if not points:
+        return None
+    ys = [p[1] for p in points]
+    xs = [p[0] for p in points]
+    mid = (min(ys) + max(ys)) / 2
+    crossings = []
+    for contour in contours:
+        for (x0, y0), (x1, y1) in zip(contour, contour[1:] + contour[:1], strict=True):
+            if (y0 - mid) * (y1 - mid) < 0:
+                crossings.append(x0 + (mid - y0) * (x1 - x0) / (y1 - y0))
+    if len(crossings) < 2:
+        return None
+    stem = max(crossings) - min(crossings)
+    return (max(xs) - min(xs)) / stem if stem > 0 else None
 
 
 def classify_font_data(data: bytes, name: str) -> str | None:
@@ -207,7 +240,6 @@ class EmbeddedFonts:
             return self._cache[key]
         ef = EmbeddedFont(name)
         flags = weight = None
-        glyph_class = None
         for xref in self._xrefs.get(key, []):
             _base, ext, _type, buffer = self.doc.extract_font(xref)
             if not buffer:
@@ -227,16 +259,12 @@ class EmbeddedFonts:
             ef.subsets.append(Subset(xref, font, coverage))
             if flags is None:
                 flags, weight = _descriptor_info(self.doc, xref)
-            if glyph_class is None:
-                try:
-                    glyph_class = _classify_by_glyphs(TTFont(io.BytesIO(buffer), lazy=True))
-                except Exception:
-                    pass
         spec = parse_postscript_name(name)
+        # Only a certain classification is recorded (name, or the PDF's FixedPitch/Serif/Script
+        # flags; Canva just sets "symbolic"). Otherwise glyph comparison decides.
         classification = classify_name(name)
         if classification is None and flags:
             classification = MONO if flags & 1 else SERIF if flags & 2 else DISPLAY if flags & 8 else None
-        classification = classification or glyph_class or SANS
         ef.profile = FontProfile(classification, weight or spec.weight, spec.italic)
         self._cache[key] = ef
         return ef
@@ -247,6 +275,30 @@ def average_width(font: pymupdf.Font, chars: set[str]) -> float | None:
     if not usable:
         return None
     return sum(font.glyph_advance(ord(ch)) for ch in usable) / len(usable)
+
+
+def _ink(font_for, chars: list[str], size: float = 36.0) -> bytes:
+    """Grayscale render of chars, one per fixed cell on a shared baseline (0 = paper)."""
+    cell = size * 1.2
+    doc = pymupdf.open()
+    page = doc.new_page(width=cell * len(chars), height=cell)
+    writer = pymupdf.TextWriter(page.rect)
+    for i, ch in enumerate(chars):
+        font = font_for(ch)
+        if font is not None:
+            writer.append((i * cell + size * 0.1, size * 0.95), ch, font=font, fontsize=size)
+    writer.write_text(page)
+    pix = page.get_pixmap(colorspace=pymupdf.csGRAY, alpha=False)
+    return bytes(255 - v for v in pix.samples)
+
+
+def glyph_similarity(reference_font_for, candidate: pymupdf.Font, chars: list[str]) -> float:
+    """Ink overlap (intersection over union) of the same characters in two fonts, 0..1."""
+    a = _ink(reference_font_for, chars)
+    b = _ink(lambda _ch: candidate, chars)
+    inter = sum(min(x, y) for x, y in zip(a, b, strict=True))
+    union = sum(max(x, y) for x, y in zip(a, b, strict=True))
+    return inter / union if union else 0.0
 
 
 # --- renderers ---------------------------------------------------------------------------------
@@ -314,42 +366,46 @@ class FontPlanner:
         return rf, self.registry.load(rf), profile
 
     def substitute_for(self, name: str, needed: set[str]) -> tuple[ResolvedFont, pymupdf.Font] | None:
+        """Closest available font: weight, style, average character width and, above all, how
+        much the letters actually look alike (classification counts only when certain)."""
         ef = self.embedded.get(name)
-        profile = ef.profile or FontProfile(SANS, 400, False)
-        sample = ef.coverage
-        ref_width = None
-        for s in ef.subsets:
-            ref_width = average_width(s.font, s.coverage)
-            if ref_width:
-                break
+        profile = ef.profile or FontProfile(None, 400, False)
+        sample = sorted(ch for ch in ef.coverage if ch.isalnum())[:24]
+        ref_width = next((w for s in ef.subsets if (w := average_width(s.font, s.coverage))), None)
 
         def score(c) -> float:
             _rf, font, p = c
-            value = 0 if p.classification == profile.classification else 5
-            value += abs(p.weight - profile.weight) / 100 + (0 if p.italic == profile.italic else 2)
-            width = average_width(font, sample) if sample else None
+            value = abs(p.weight - profile.weight) / 100 + (0 if p.italic == profile.italic else 2)
+            if profile.classification and p.classification != profile.classification:
+                value += 5
+            width = average_width(font, set(sample)) if sample else None
             if ref_width and width:
                 value += 10 * abs(width / ref_width - 1)
+            chars = [ch for ch in sample if font.has_glyph(ord(ch))]
+            if chars:
+                value += 10 * (1 - glyph_similarity(ef.font_for, font, chars))
             return value
 
         def covers(c) -> bool:
             return all(c[1].has_glyph(ord(ch)) for ch in needed if not ch.isspace())
 
         pool = [c for c in self._candidate_list() if covers(c)]
-        if not any(c[2].classification == profile.classification for c in pool):
-            fetched = self._fetch_pool_font(profile)
-            if fetched and covers(fetched):
-                pool.append(fetched)
+        wanted = [profile.classification] if profile.classification else [SANS, SERIF, DISPLAY]
+        for classification in wanted:
+            if not any(c[2].classification == classification for c in pool):
+                fetched = self._fetch_pool_font(classification, profile)
+                if fetched and covers(fetched):
+                    pool.append(fetched)
         if not pool:
             return None
         best = min(pool, key=score)
         return best[0], best[1]
 
-    def _fetch_pool_font(self, profile: FontProfile):
+    def _fetch_pool_font(self, classification: str, profile: FontProfile):
         weight = min(_WEIGHT_NAMES, key=lambda w: abs(w - profile.weight))
         style = _WEIGHT_NAMES[weight] + ("Italic" if profile.italic else "")
         style = "Italic" if style == "RegularItalic" else style
-        for family in DEFAULT_POOL[profile.classification]:
+        for family in DEFAULT_POOL[classification]:
             rf = self.registry.resolve(f"{family.replace(' ', '')}-{style}")
             if rf:
                 self._candidates = None

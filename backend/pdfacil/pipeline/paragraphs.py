@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from statistics import median
 
 from .extract import Line, Span
+from .lists import detect_list, strip_prefix
 
 EDGE_TOLERANCE = 1.5  # pt
 PITCH_TOLERANCE = 0.15  # fraction of the block's line pitch
@@ -72,25 +73,9 @@ class VisualLine:
         return end - start if start is not None else 0.0
 
 
-BULLET_CHARS = "•◦▪▫‣⁃●○■□–-*"
-
-
-def starts_list_item(line: VisualLine, markers) -> bool:
-    """A bullet glyph at the start, or a small bullet shape just left of the line."""
-    if line.text.lstrip()[:1] in BULLET_CHARS and len(line.text.strip()) > 1:
-        return True
-    top, bottom = line.baseline - line.size, line.baseline
-    return any(
-        line.x0 - 3 * line.size <= m[0] and m[2] <= line.x0 + 1 and m[1] < bottom and m[3] > top
-        for m in markers
-    )
-
-
-def is_hard_break(prev: VisualLine, nxt: VisualLine, box_width: float, markers=()) -> bool:
+def is_hard_break(prev: VisualLine, nxt: VisualLine, box_width: float) -> bool:
     """A wrapped line is too full for the next line's first word; if that word would have fit,
-    the author broke the line on purpose (list items, addresses, short lines)."""
-    if starts_list_item(nxt, markers):
-        return True
+    the author broke the line on purpose (addresses, short lines)."""
     if prev.text.rstrip().endswith("-"):
         return False
     space = 0.28 * prev.size
@@ -241,22 +226,29 @@ def _merge_runs(runs: list[dict]) -> list[dict]:
 
 
 def block_to_element(block: Block, element_id: str, page_width: float, containers=(), markers=()) -> dict:
-    """containers: shapes behind text (for centering); markers: small shapes that may be
-    bullets (for list item breaks)."""
+    """containers: shapes behind text (for centering); markers: (index, bbox) of small shapes
+    that may be bullets."""
     spans = [s for ln in block.lines for s in ln.spans]
     x0 = min(ln.x0 for ln in block.lines)
     x1 = max(ln.x1 for ln in block.lines)
     y0 = min(s.bbox[1] for s in spans)
     y1 = max(s.bbox[3] for s in spans)
+    info = detect_list(block.lines, list(markers))
 
-    # Paragraph text: lines joined with spaces (Canva does not distinguish wraps from breaks).
+    # Paragraph text: wrapped lines joined with spaces, hard breaks (list items, short lines)
+    # kept as "\n". Glyph and number markers are not part of the editable text.
     flat: list[dict] = []
     for i, ln in enumerate(block.lines):
         line_runs = _runs_for(ln.spans, with_positions=False)
+        if info and i in info.prefix_len:
+            line_runs = strip_prefix(line_runs, info.prefix_len[i])
+        line_runs = line_runs or [{"text": "", **dict(zip(("font", "size", "color"), ln.style, strict=True))}]
         line_runs[0]["text"] = line_runs[0]["text"].lstrip()
         line_runs[-1]["text"] = line_runs[-1]["text"].rstrip()
         if i < len(block.lines) - 1:
-            if is_hard_break(ln, block.lines[i + 1], x1 - x0, markers):
+            nxt = block.lines[i + 1]
+            hard = (i + 1 in info.item_starts) if info else is_hard_break(ln, nxt, x1 - x0)
+            if hard:
                 line_runs[-1]["text"] += "\n"
             elif not line_runs[-1]["text"].endswith("-"):
                 line_runs[-1]["text"] += " "
@@ -265,7 +257,7 @@ def block_to_element(block: Block, element_id: str, page_width: float, container
     size = block.lines[0].size
     pitch = block.pitch
     letter_spacings = [s.letter_spacing for s in spans if len(s.text) > 1]
-    return {
+    element = {
         "id": element_id,
         "type": "text",
         "bbox": [round(v, 2) for v in (x0, y0, x1, y1)],
@@ -286,6 +278,15 @@ def block_to_element(block: Block, element_id: str, page_width: float, container
         ],  # fmt: skip
         "source": {"spanRects": [list(s.bbox) for s in spans if s.text.strip()]},
     }
+    if info:
+        element["list"] = info.to_json()
+        if info.marker == "shape":
+            # Saved lines carry no marker text, so flag where the export must draw one.
+            for i in info.item_starts:
+                element["lines"][i]["listItem"] = True
+            element["source"]["markerShapes"] = info.shape_indices
+            element["source"]["markerTemplate"] = info.template
+    return element
 
 
 def locked_line_element(line: Line, element_id: str) -> dict:

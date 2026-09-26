@@ -32,12 +32,22 @@ def build_page_elements(ex: PageExtraction, fonts: dict[str, DocFont]) -> list[d
     text_kinds = ("fill-text", "stroke-text", "ignore-text")
     containers = [g.bbox for g in ex.drawings if not g.background and not g.outlined_text]
     markers = [
-        b for b in containers
-        if 0 < b[2] - b[0] <= 24 and 0 < b[3] - b[1] <= 24
-        and 0.5 <= (b[2] - b[0]) / (b[3] - b[1]) <= 2
+        (i, g.bbox) for i, g in enumerate(ex.drawings)
+        if not g.background and not g.outlined_text
+        and 0 < g.bbox[2] - g.bbox[0] <= 24 and 0 < g.bbox[3] - g.bbox[1] <= 24
+        and 0.5 <= (g.bbox[2] - g.bbox[0]) / (g.bbox[3] - g.bbox[1]) <= 2
     ]  # fmt: skip
+    absorbed: set[int] = set()
     for i, block in enumerate(build_blocks(ex.lines)):
         el = block_to_element(block, f"p{n}-t{i}", ex.width, containers, markers)
+        # Bullet shapes of a list belong to the text element now, not the page.
+        used = el["source"].pop("markerShapes", None)
+        if used:
+            absorbed.update(used)
+            template = ex.drawings[el["source"].pop("markerTemplate")]
+            el["source"]["markerSeqnos"] = [p["seqno"] for u in used for p in ex.drawings[u].paths]
+            el["source"]["markerRects"] = [list(ex.drawings[u].bbox) for u in used]
+            el["source"]["markerTemplate"] = [p["seqno"] for p in template.paths]
         keyed.append((_text_z(ex, el, text_kinds), el))
     rotated = [ln for ln in ex.lines if not ln.horizontal and ln.text.strip()]
     for i, line in enumerate(rotated):
@@ -64,6 +74,8 @@ def build_page_elements(ex: PageExtraction, fonts: dict[str, DocFont]) -> list[d
         keyed.append((z, el))
 
     for i, group in enumerate(ex.drawings):
+        if i in absorbed:
+            continue
         el = {
             "id": f"p{n}-s{i}",
             "type": "shape",
