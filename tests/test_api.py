@@ -30,6 +30,14 @@ def test_editor_page_served(client):
     assert "PDFacil" in r.text and "/sessions" in r.text
 
 
+def test_font_catalog(client):
+    families = client.get("/fonts/catalog").json()["families"]
+    names = {f["family"] for f in families}
+    assert {"Montserrat", "Open Sans", "Bebas Neue"} <= names
+    assert "Helvetica" not in names
+    assert "700" in next(f for f in families if f["family"] == "Montserrat")["styles"]
+
+
 def test_healthz_and_source(client):
     assert client.get("/healthz").json() == {"ok": True}
     assert "github.com" in client.get("/source").json()["url"]

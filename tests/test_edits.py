@@ -62,6 +62,32 @@ def test_headline_word_change(one_pager, registry):
     assert changed_outside(before, after, [grow]) == 0
 
 
+def test_change_font_size_color_and_alignment(one_pager, registry):
+    editor = DocumentEditor(one_pager, registry)
+    head = find_text(editor, "Fall Underwriting")
+    run = {"text": "Fall Packages", "font": "Playfair Display-Bold", "size": 40, "color": "#1A1A1A"}
+    result = editor.apply([{"op": "editText", "id": head["id"], "runs": [run], "align": "left"}])
+    assert not [w for w in result.warnings if w["code"] != "text-overflow"]
+    spans = [s for s in spans_in(editor.export(), (0, 20, 612, 100)) if round(s["size"]) == 40]
+    assert "".join(s["text"] for s in spans) == "Fall Packages"
+    assert {font_key(s["font"]) for s in spans} == {"playfairdisplaybold"}
+    assert {round(s["size"]) for s in spans} == {40}
+    assert {s["color"] for s in spans} == {0x1A1A1A}
+    # Left aligned at the block's left edge, and the top of the block stays put.
+    assert min(s["bbox"][0] for s in spans) == pytest.approx(head["bbox"][0], abs=2)
+    assert min(s["bbox"][1] for s in spans) == pytest.approx(head["bbox"][1], abs=4)
+
+
+def test_resizing_text_rewraps_to_new_width(one_pager, registry):
+    editor = DocumentEditor(one_pager, registry)
+    body = find_text(editor, "Our fall packages")
+    x0, y0, _x1, y1 = body["bbox"]
+    editor.apply([{"op": "transform", "id": body["id"], "bbox": [x0, y0, x0 + 150, y1]}])
+    spans = [s for s in spans_in(editor.export(), (60, 200, 330, 400)) if round(s["size"]) == 11]
+    assert max(s["bbox"][2] for s in spans) <= x0 + 150.5
+    assert len({round(s["origin"][1]) for s in spans}) > len(body["lines"])
+
+
 def test_saved_lines_are_placed_exactly(one_pager, registry):
     """Export places each saved line at its saved baseline within 0.5 pt."""
     editor = DocumentEditor(one_pager, registry)
@@ -141,6 +167,22 @@ def test_move_image_reuses_data(one_pager, registry):
         i for i, e in moved.items() if e["type"] == "text" and e["runs"][0]["text"].startswith("Photo")
     )
     assert order.index(img) < order.index(cap)
+
+
+def test_move_image_and_edit_text_on_same_page(one_pager, registry):
+    editor = DocumentEditor(one_pager, registry)
+    photo = next(e for e in elements(editor).values() if e["type"] == "image" and e["bbox"][0] == 72)
+    head = find_text(editor, "Fall Underwriting")
+    circle = next(e for e in elements(editor).values() if e["type"] == "shape" and e["bbox"][0] == 360)
+    editor.apply([
+        {"op": "editText", "id": head["id"], "runs": [{**head["runs"][0], "text": "Winter"}]},
+        {"op": "transform", "id": circle["id"], "bbox": [370, 600, 430, 660]},
+        {"op": "transform", "id": photo["id"], "bbox": [80, 420, 308, 580]},
+    ])  # fmt: skip
+    page = pymupdf.open(stream=editor.export(), filetype="pdf")[0]
+    xref = next(x[0] for x in page.get_images() if x[2] == 228)
+    assert list(page.get_image_rects(xref)[0]) == pytest.approx([80, 420, 308, 580], abs=0.01)
+    assert "Winter" in page.get_text()
 
 
 def test_resize_transparent_logo_keeps_alpha(one_pager, registry):

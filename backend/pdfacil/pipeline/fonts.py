@@ -124,6 +124,7 @@ class CatalogEntry:
     category: str  # "Sans Serif", "Serif", "Display", "Handwriting", "Monospace"
     styles: frozenset[str]  # "400", "700i", ...
     width_range: tuple[float, float] | None = None  # wdth axis, when the family has one
+    popularity: int = 0  # catalog rank, lower is more popular
 
 
 # "Open Sans Condensed" left the catalog when Open Sans gained a width axis; Canva still
@@ -180,6 +181,7 @@ class GoogleFonts:
                     f.get("category", ""),
                     frozenset(f.get("fonts", {})),
                     (wdth["min"], wdth["max"]) if wdth else None,
+                    f.get("popularity") or 10**6,
                 )
             self._catalog = catalog
         return self._catalog

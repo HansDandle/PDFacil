@@ -23,6 +23,17 @@ def create_app(settings: Settings | None = None, google: GoogleFonts | None = No
     def index():
         return FileResponse(WEB_DIR / "index.html")
 
+    @app.get("/fonts/catalog")
+    def font_catalog():
+        """Open Google Fonts families (most popular first) for the font picker."""
+        google = app.state.services.fonts.google
+        entries = sorted(google.catalog().values(), key=lambda e: e.popularity) if google else []
+        return {
+            "families": [
+                {"family": e.family, "category": e.category, "styles": sorted(e.styles)} for e in entries
+            ]
+        }
+
     @app.get("/healthz")
     def healthz():
         return {"ok": True}

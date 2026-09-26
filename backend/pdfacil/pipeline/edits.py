@@ -155,6 +155,15 @@ class DocumentEditor:
         shapes = [(el, st) for el, st in items if el["type"] == "shape"]
         images = [(el, st) for el, st in items if el["type"] == "image"]
 
+        # 0. Images first: rewrite each placement in the original content stream (keeps z-order
+        #    and image bytes). Redactions below rewrite the stream and rename its resources.
+        for el, st in images:
+            new_bbox = None if st.deleted else st.bbox
+            if new_bbox is None and not st.deleted:
+                continue
+            if not self._rewrite_image(page, el, new_bbox):
+                raise OpError(f"could not locate image placement for {el['id']}")
+
         # 1. Remove original text of edited, moved or deleted text elements.
         if texts:
             for el, _ in texts:
@@ -203,15 +212,7 @@ class DocumentEditor:
                     _draw_paths(page, model.drawings[el["id"]], matrix)
                     result.notices.append({"id": el["id"], "code": "shape-on-top"})
 
-        # 3. Images: rewrite the placement in the content stream (keeps z-order and bytes).
-        for el, st in images:
-            new_bbox = None if st.deleted else st.bbox
-            if new_bbox is None and not st.deleted:
-                continue
-            if not self._rewrite_image(page, el, new_bbox):
-                raise OpError(f"could not locate image placement for {el['id']}")
-
-        # 4. Write text.
+        # 3. Write text.
         for el, st in texts:
             if st.deleted:
                 continue
@@ -259,6 +260,8 @@ class DocumentEditor:
         self, page: pymupdf.Page, el: dict, st: ElementState, result: ApplyResult, new=False
     ) -> None:
         op = st.text or {}
+        # Block-level style changes travel with the text op.
+        el = {**el, **{k: op[k] for k in ("align", "lineHeight", "letterSpacing") if k in op}}
         runs = op.get("runs") or el["runs"]
         lines = op.get("lines")
         choice = op.get("fontFallback", SUBSTITUTE)
@@ -279,18 +282,27 @@ class DocumentEditor:
 
         box = st.bbox or el["bbox"]
         dx, dy = box[0] - el["bbox"][0], box[1] - el["bbox"][1]
+        resized = st.bbox is not None and abs((box[2] - box[0]) - (el["bbox"][2] - el["bbox"][0])) > 0.5
         shift = False
         if not lines:
-            if st.text is None and not new:
+            if st.text is None and not new and not resized:
                 lines = el["lines"]  # moved only: reuse the original layout
                 shift = True
             else:
-                first = el["lines"][0]["baseline"] + dy if el["lines"] else _first_baseline(el, runs, plan)
+                same_style = all(
+                    (r["font"], r["size"]) in {(o["font"], o["size"]) for o in el["runs"]} for r in runs
+                )
+                if el["lines"] and same_style:
+                    first = el["lines"][0]["baseline"] + dy
+                else:
+                    # New font or size: keep the top of the block where it was.
+                    first = _first_baseline({**el, "bbox": box}, runs, plan)
                 x0, x1 = box[0], box[2]
                 if lst:
                     x0 = lst["textX"] + dx  # item text column; markers hang to the left
-                elif not new and not st.bbox and len(el["lines"]) == 1:
-                    x0, x1 = self._single_line_span(page.number, el)
+                elif not new and not resized and len(el["lines"]) == 1:
+                    # Room to grow sideways (see _single_line_span), moved along with the block.
+                    x0, x1 = (v + dx for v in self._single_line_span(page.number, el))
                 lines = layout_text(
                     runs,
                     x0=x0,
@@ -309,7 +321,11 @@ class DocumentEditor:
                 for ln in lines
             ]  # fmt: skip
 
-        if lines and lines[-1]["baseline"] > box[3] + 0.5:
+        restyled = any(
+            (r["font"], r["size"]) not in {(o["font"], o["size"]) for o in el.get("runs", [])} for r in runs
+        )
+        if lines and lines[-1]["baseline"] > box[3] + 0.5 and not restyled:
+            # Deliberately bigger text is expected to grow; only warn when more words overflow.
             result.warnings.append({"id": el["id"], "code": "text-overflow"})
         if lst:
             lines = lines + self._draw_list_markers(page, el, lines, marker_runs)
